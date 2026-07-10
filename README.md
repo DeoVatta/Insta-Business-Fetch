@@ -53,7 +53,7 @@ OLAGON_BASE_URL=https://gateway.olagon.site
 1. Go to [Google Cloud Console](https://console.cloud.google.com) → IAM → Service Accounts
 2. Create a service account, download the JSON key
 3. Save it as `gcp-service-account.json`
-4. Share your Google Sheet with the service account email (`...@....iam.gserviceaccount.com`)
+4. Share your Google Sheet with the service account email (`claude@cogent-range-458804-r9.iam.gserviceaccount.com`)
 
 The pipeline expects two tabs:
 
