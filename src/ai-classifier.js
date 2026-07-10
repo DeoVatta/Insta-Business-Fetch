@@ -267,11 +267,94 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
     return results;
 }
 
-// ===== SINGLE PROFILE QUICK CLASSIFY =====
-// Fast classification for 1-5 profiles (skip batching overhead)
+// ===== HASHTAG CLASSIFICATION =====
+const HT_SYSTEM_PROMPT = `You are a hashtag classifier for Indonesian wedding/bride industry.
+
+Analyze each hashtag and determine if it is related to a business or brand.
+
+Each hashtag has the format: #hashtag (e.g. #muasemarang, #riasjogja)
+
+Return a JSON array ONLY — no thinking, no explanation, no markdown.
+
+Each entry:
+{"h":"hashtag_name_without_#","business":true_or_false,"reason":"short reason in Indonesian"}
+
+business=true if:
+- Related to wedding/makeup/beauty vendors (MUA, fotografer, dekorasi, catering, gaun, venue, organizer, MC, dll)
+- Business/service type hashtags
+- Location-based vendor hashtags (e.g. #muasemarang = business)
+- Brand or service account hashtags
+
+business=false if:
+- Generic/lifestyle hashtags (love, happy, beautiful, nature, dll)
+- General Instagram hashtags with no business relation
+- Personal/use hashtags unrelated to wedding services
+- Event-only hashtags without vendor relation
+
+Be strict — only mark true if clearly a business/service hashtag.`;
+
+// Max 200 hashtags per request
+const HT_BATCH_MAX = 200;
+
+export async function classifyHashtagsBatch(hashtags) {
+    if (!hashtags || hashtags.length === 0) return [];
+    if (!OLAGON_API_KEY) {
+        console.warn('[AI] OLAGON_API_KEY not set — skipping hashtag classification');
+        return hashtags.map(t => ({ tag: t, business: true, reason: 'no AI key' }));
+    }
+
+    const unique = [...new Set(hashtags.map(t => t.replace(/^#/, '').toLowerCase().trim()))].filter(Boolean);
+    if (unique.length === 0) return [];
+
+    const batches = [];
+    for (let i = 0; i < unique.length; i += HT_BATCH_MAX) {
+        batches.push(unique.slice(i, i + HT_BATCH_MAX));
+    }
+
+    console.log(`[AI] Classifying ${unique.length} hashtags in ${batches.length} batch(es)`);
+
+    const allResults = [];
+
+    for (let b = 0; b < batches.length; b++) {
+        const batch = batches[b];
+        const batchNum = b + 1;
+        console.log(`[AI] Hashtag batch ${batchNum}/${batches.length}: ${batch.length} hashtags...`);
+
+        const messages = [{
+            role: 'user',
+            content: JSON.stringify(batch.map(t => '#' + t)) + '\n\nJSON array only. No thinking. No markdown.'
+        }];
+
+        try {
+            const text = await aiRequest(messages, HT_SYSTEM_PROMPT);
+            const parsed = parseAiResponse(text, batch.length);
+
+            for (const item of parsed) {
+                const tag = item.h?.startsWith('#') ? item.h : '#' + (item.h || '');
+                allResults.push({
+                    tag,
+                    business: item.business === true || item.business === 'true',
+                    reason: item.reason || '',
+                });
+            }
+
+            console.log(`[AI] Hashtag batch ${batchNum}: ${parsed.length} results`);
+        } catch (e) {
+            console.warn(`[AI] Hashtag batch ${batchNum} failed: ${e.message} — marking all as business`);
+            for (const t of batch) {
+                allResults.push({ tag: '#' + t, business: true, reason: 'AI unavailable' });
+            }
+        }
+    }
+
+    const businessOnly = allResults.filter(r => r.business);
+    console.log(`[AI] ${businessOnly.length}/${allResults.length} hashtags classified as business-related`);
+
+    return businessOnly;
+}
+
 export async function classifyProfileQuick(profile) {
     if (!OLAGON_API_KEY) return profile;
-
     const profiles = await classifyProfilesBatch([profile]);
     return profiles[0] || profile;
 }

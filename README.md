@@ -56,23 +56,33 @@ GOOGLE_SHEETS_ID=your_google_sheets_id_here
 
 The pipeline expects a Google Sheet with one tab: **Instagram**. All data (competitors, vendors, clients) goes into this single sheet — no sheet splitting. The pipeline auto-creates the "Instagram" sheet tab if it doesn't exist.
 
-**Sheet structure (column A → L):**
+The pipeline expects a Google Sheet with two tabs:
+
+**Sheet 1 — Instagram (A-L):**
 | Col | Header | Description |
 |-----|--------|-------------|
-| A | No | ROW()-1 formula (auto) |
+| A | No | ROW()-1 (manual formula) |
 | B | Nama | Instagram Display Name |
 | C | Instagram | Profile URL |
-| D | Whatsapp | WhatsApp number (auto-extracted from bio) |
-| E | Website | Website URL (auto-extracted from bio) |
-| F | Category | Business category (MUA, Photographer, Catering, Client, etc.) |
+| D | Whatsapp | WhatsApp number (AI-extracted) |
+| E | Website | Website URL (AI-extracted) |
+| F | Category | Business category (AI-classified) |
 | G | Followers | Follower count |
 | H | Post | Number of posts |
 | I | Location | Business location (city) |
 | J | Last Post | URL of most recent post |
-| K | Analytics | Engagement rate (likes+comments / followers) |
+| K | Analytics | Engagement rate |
 | L | Status | Manual input by user |
 
-**Hashtag source:** Add hashtags in column A of the sheet (as `#muasemarang`, `#riasjogja`, etc.). Rows starting with `#` are read as hashtags.
+**Sheet 2 — Hashtags (A-D):**
+| Col | Header | Description |
+|-----|--------|-------------|
+| A | No | ROW()-1 (manual formula) |
+| B | Hashtag | Hashtag name (e.g. #muasemarang) |
+| C | Found | Times this hashtag was found |
+| D | Status | Pending / Executing / Executed |
+
+Add hashtags to the Hashtags sheet with status `Pending`. AI classifies them at end of each run — only writes to this sheet if the hashtag is business-related.
 
 ## AI Classification
 
