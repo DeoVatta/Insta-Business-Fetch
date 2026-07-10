@@ -250,7 +250,7 @@ async function initBrowser() {
     _page = await _context.newPage();
 
     // Establish session
-    await _page.goto('https://www.instagram.com/', { waitUntil: 'networkidle', timeout: 30000 });
+    await _page.goto('https://www.instagram.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await _page.waitForTimeout(2000);
     // Capture all cookies (including Instagram-set ones) so HTTP API calls work
     await refreshCookieStr();
@@ -783,7 +783,8 @@ async function scrapeHashtag(hashtag, maxPosts = 200) {
     if (!_page) await initBrowser();
 
     console.log(`[HASHTAG] #${hashtag}`);
-    const searchUrl = `https://www.instagram.com/explore/search/keyword/?q=%23${encodeURIComponent(hashtag)}`;
+    const cleanTag = hashtag.replace(/^#/, '');
+    const searchUrl = `https://www.instagram.com/explore/search/keyword/?q=%23${encodeURIComponent(cleanTag)}`;
 
     await _page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 40000 });
 
