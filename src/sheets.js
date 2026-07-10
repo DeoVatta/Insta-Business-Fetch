@@ -13,6 +13,7 @@ import { GoogleAuth } from 'google-auth-library';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { classifyProfilesBatch } from './ai-classifier.js';
 import { SHEETS_ID } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -31,6 +32,12 @@ const HT_HEADER = [
 // ===== INIT =====
 let sheetsClient = null;
 let sheetInitialized = false;
+
+// Batch write buffer to avoid per-row API calls (60 writes/min limit)
+let _profileBuffer = []; // stores raw profile objects for AI batch
+let _flushTimer = null;
+const BATCH_SIZE = 10; // flush every N profiles
+const BATCH_FLUSH_MS = 30000; // or every 30s
 
 async function initSheets() {
     if (sheetsClient && sheetInitialized) return sheetsClient;
@@ -188,6 +195,95 @@ async function appendRow(sheetName, endCol, values) {
     }
 }
 
+// Flush buffered profile rows to sheets in one API call
+async function flushProfileRows() {
+    if (_profileBuffer.length === 0) return 0;
+    const profiles = _profileBuffer.splice(0, _profileBuffer.length);
+
+    // AI batch classify all profiles at once
+    let aiProfiles = profiles;
+    try {
+        aiProfiles = await classifyProfilesBatch(profiles);
+    } catch (e) {
+        console.warn(`[SHEETS BATCH] AI classify failed: ${e.message} — using raw profiles`);
+    }
+
+    // Convert to rows
+    const rows = aiProfiles.map(profileToRow);
+    const ok = await appendRow('Instagram', 'L', rows);
+    if (ok) {
+        console.log(`  [SHEETS BATCH] Flushed ${rows.length} profiles to Instagram sheet`);
+    } else {
+        // Put back on failure
+        _profileBuffer.unshift(...profiles);
+        console.log(`  [SHEETS BATCH] Flush failed — ${profiles.length} rows returned to buffer`);
+    }
+    return ok ? rows.length : 0;
+}
+
+// Convert a profile object to a sheet row (columns A-L)
+function profileToRow(profile) {
+    const bio = profile.bio || '';
+    const wa = profile.whatsapp || extractWhatsApp(bio);
+    const website = profile.website || extractWebsite(bio);
+
+    let analyticsStr;
+    if (profile.analytics) {
+        analyticsStr = typeof profile.analytics === 'string' ? profile.analytics : `${profile.analytics}%`;
+    } else if (profile.followers && profile.followers > 0) {
+        const rate = (((profile.postLikes || 0) + (profile.postComments || 0)) / profile.followers * 100).toFixed(2);
+        analyticsStr = `${rate}%`;
+    } else {
+        analyticsStr = 'N/A';
+    }
+
+    const username = (profile.username || '').replace('@', '').toLowerCase();
+
+    // Handle clientData (from writeClientFromComment) vs full profile
+    if (profile.via === 'comment') {
+        return [
+            '',
+            username,
+            profile.profileUrl || `https://instagram.com/${username}/`,
+            '',
+            '',
+            'Client',
+            0, 0,
+            profile.location || '',
+            '',
+            'N/A',
+            'Pending',
+        ];
+    }
+
+    return [
+        '',
+        profile.displayName || username,
+        profile.profileUrl || `https://instagram.com/${username}/`,
+        wa,
+        website,
+        profile.category || '',
+        profile.followers || 0,
+        profile.posts || 0,
+        profile.location || '',
+        profile.lastPostUrl || '',
+        analyticsStr,
+        'Pending',
+    ];
+}
+
+// Schedule flush: flush if buffer >= BATCH_SIZE, otherwise schedule timer
+function scheduleFlush() {
+    if (_profileBuffer.length >= BATCH_SIZE) {
+        flushProfileRows();
+    } else if (!_flushTimer) {
+        _flushTimer = setTimeout(async () => {
+            _flushTimer = null;
+            await flushProfileRows();
+        }, BATCH_FLUSH_MS);
+    }
+}
+
 // Write a batch of AI-approved hashtags to Hashtags sheet
 // Discovered hashtags → Status: Pending (queued for next run)
 async function writeHashtagBatch(hashtags, existingHashtags) {
@@ -298,7 +394,8 @@ function extractWebsite(bio = '') {
     return m ? m[0] : '';
 }
 
-// Write a single profile to Instagram sheet
+// Write a single profile to Instagram sheet (buffered — flushed every BATCH_SIZE rows or 30s)
+// Stores raw profile objects; AI classify happens during flush
 async function writeProfile(profile, existingUsernames) {
     if (!profile || !profile.username) return;
 
@@ -308,42 +405,10 @@ async function writeProfile(profile, existingUsernames) {
         return;
     }
 
-    const bio = profile.bio || '';
-    const wa = profile.whatsapp || extractWhatsApp(bio);
-    const website = profile.website || extractWebsite(bio);
-
-    let analyticsStr;
-    if (profile.analytics) {
-        analyticsStr = typeof profile.analytics === 'string' ? profile.analytics : `${profile.analytics}%`;
-    } else if (profile.followers && profile.followers > 0) {
-        const rate = (((profile.postLikes || 0) + (profile.postComments || 0)) / profile.followers * 100).toFixed(2);
-        analyticsStr = `${rate}%`;
-    } else {
-        analyticsStr = 'N/A';
-    }
-
-    const row = [
-        '',
-        profile.displayName || username,
-        profile.profileUrl || `https://instagram.com/${username}/`,
-        wa,
-        website,
-        profile.category || '',
-        profile.followers || 0,
-        profile.posts || 0,
-        profile.location || '',
-        profile.lastPostUrl || '',
-        analyticsStr,
-        'Pending',
-    ];
-
-    const ok = await appendRow('Instagram', 'L', [row]);
-    if (ok) {
-        existingUsernames.add(username);
-        console.log(`  [SAVED] @${username} | ${profile.category} | ${wa || 'no WA'}`);
-    } else {
-        console.log(`  [FAIL] @${username} write failed`);
-    }
+    _profileBuffer.push(profile);
+    existingUsernames.add(username);
+    scheduleFlush();
+    console.log(`  [BUFFER] @${username} | ${profile.category || 'N/A'} (${_profileBuffer.length} buffered)`);
 }
 
 // Write a client found via comment
@@ -353,29 +418,14 @@ async function writeClientFromComment(clientData, existingUsernames) {
     const username = clientData.username.replace('@', '').toLowerCase();
     if (existingUsernames.has(username)) return;
 
-    const row = [
-        '',
-        username,
-        clientData.profileUrl || `https://instagram.com/${username}/`,
-        '',
-        '',
-        'Client',
-        0, 0,
-        clientData.location || '',
-        '',
-        'N/A',
-        'Pending',
-    ];
-
-    const ok = await appendRow('Instagram', 'L', [row]);
-    if (ok) {
-        existingUsernames.add(username);
-        console.log(`  [SAVED CLIENT] @${username}`);
-    }
+    _profileBuffer.push(clientData);
+    existingUsernames.add(username);
+    scheduleFlush();
+    console.log(`  [BUFFER CLIENT] @${username}`);
 }
 
 export {
     initSheets, readHashtags, readHashtagsWithStatus, readHashtagsInSheet, readVisitedProfiles,
     writeHashtagBatch, markHashtagStatus, resetHashtagStatuses,
-    writeProfile, writeClientFromComment,
+    writeProfile, writeClientFromComment, flushProfileRows,
 };

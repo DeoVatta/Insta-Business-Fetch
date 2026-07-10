@@ -28,7 +28,7 @@ import { classifyProfilesBatch, classifyHashtagsBatch } from './src/ai-classifie
 import {
     initSheets, readHashtags, readHashtagsWithStatus, readHashtagsInSheet, readVisitedProfiles,
     writeHashtagBatch, markHashtagStatus, resetHashtagStatuses,
-    writeProfile, writeClientFromComment,
+    writeProfile, writeClientFromComment, flushProfileRows,
 } from './src/sheets.js';
 import { isIndonesian } from './src/classifier.js';
 import { MAX_API_ERRORS_CONSECUTIVE, REQUEST_DELAY } from './src/config.js';
@@ -38,16 +38,14 @@ import {
     addToQueue, getNextInQueue, markQueueDone,
     isVisited, markVisited, markEnriched, getQueueStats,
     addHashtag, getHashtags,
-    incStats, bufferProfile, getProfileBuffer, clearProfileBuffer,
+    incStats,
     printStats,
 } from './src/state.js';
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 const MAX_DEPTH = 4;
-const PROFILE_BATCH_SIZE = 10;
 const POSTS_PER_PROFILE = 20;
-const SAVE_EVERY = 10;
 
 let postCount = 0;
 let globalErrorCount = 0;
@@ -255,7 +253,7 @@ async function run() {
     await processDiscoveryQueue(existingUsernames);
 
     // DONE
-    await forceSave();
+    await flushProfileRows();
     await checkpoint('All hashtags complete');
     printStats();
     await closeBrowser();
@@ -337,18 +335,13 @@ async function enrichAndNestedDiscover(username, profile, depth, sourcePost, exi
     // Mark profile as enriched
     markEnriched(username);
 
-    // Add profile to batch for AI write
-    profile.sourceHashtag = `nested d${depth} via @${sourcePost}`;
-    profile.via = 'discovery';
-    bufferProfile(profile);
-    existingUsernames.add(username.toLowerCase());
-
+    // Write directly to sheets (sheets.js handles batching/flush)
+    await writeProfile(profile, existingUsernames);
     sessionProfileCount++;
     incStats('profiles');
 
-    if (sessionProfileCount % SAVE_EVERY === 0) {
-        await flushProfileBuffer(existingUsernames);
-        await checkpoint(`Saved after ${sessionProfileCount} profiles`);
+    if (sessionProfileCount % 10 === 0) {
+        await forceSave();
         printStats();
     }
 }
@@ -411,58 +404,13 @@ async function processDiscoveryQueue(existingUsernames) {
     }
 
     // Flush remaining buffer
-    await flushProfileBuffer(existingUsernames);
-}
-
-/**
- * Flush profile buffer: AI batch → write to sheet
- */
-async function flushProfileBuffer(existingUsernames) {
-    const buf = getProfileBuffer();
-    if (!buf || buf.length === 0) return;
-
-    console.log(`\n[FLUSH] Processing ${buf.length} buffered profiles...`);
-
-    // Dedupe buffer
-    const seen = new Set();
-    const unique = buf.filter(p => {
-        const key = (p.username || '').toLowerCase();
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-    });
-
-    if (unique.length === 0) {
-        clearProfileBuffer();
-        return;
-    }
-
-    // AI batch classify
-    incStats('batches');
-    try {
-        const aiProfiles = await classifyProfilesBatch(unique);
-        incStats('aiProfiles', aiProfiles.length);
-
-        for (const p of aiProfiles) {
-            await writeProfile(p, existingUsernames);
-        }
-
-        console.log(`  → ${aiProfiles.length} profiles written to sheet`);
-    } catch (e) {
-        console.warn(`[FLUSH] AI batch failed: ${e.message} — using fallback`);
-        for (const p of unique) {
-            await writeProfile(p, existingUsernames);
-        }
-    }
-
-    clearProfileBuffer();
-    await forceSave();
+    await flushProfileRows();
 }
 
 // ===== SIGNALS =====
 process.on('SIGINT', async () => {
     console.log('\n[ABORT] Saving state before exit...');
-    await flushProfileBuffer(new Set());
+    await flushProfileRows();
     await forceSave();
     printStats();
     await closeBrowser().catch(() => {});
@@ -471,7 +419,7 @@ process.on('SIGINT', async () => {
 
 process.on('uncaughtException', async (e) => {
     console.error('[CRASH]', e.message);
-    await flushProfileBuffer(new Set()).catch(() => {});
+    await flushProfileRows().catch(() => {});
     await forceSave();
     await closeBrowser().catch(() => {});
     process.exit(1);
