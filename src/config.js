@@ -2,8 +2,18 @@
  * Instagram Prospector - Config
  */
 
+import dotenv from 'dotenv';
+dotenv.config();
+
 export const SERVICE_ACCOUNT_FILE = './gcp-service-account.json';
-export const COOKIES_FILE = './instagram-cookies.json';
+
+// Instagram credentials — set in .env
+export const IG_USERNAME = process.env.IG_USERNAME || '';
+export const IG_PASSWORD = process.env.IG_PASSWORD || '';
+
+// Google Sheets output — set in .env
+// Create a sheet with tabs: Competitors, Vendor, Client, VendorHashtags
+export const SHEETS_ID = process.env.GOOGLE_SHEETS_ID || '';
 
 // Limits
 export const HASHTAGS_PER_RUN = 1;

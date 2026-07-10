@@ -44,6 +44,7 @@ Edit `.env`:
 ```
 IG_USERNAME=your_instagram_username
 IG_PASSWORD=your_instagram_password
+GOOGLE_SHEETS_ID=your_google_sheets_id_here
 ```
 
 ### 3. Google Sheets service account
@@ -51,13 +52,15 @@ IG_PASSWORD=your_instagram_password
 1. Go to [Google Cloud Console](https://console.cloud.google.com) → IAM → Service Accounts
 2. Create a service account, download the JSON key
 3. Save it as `gcp-service-account.json` in the project root
-4. Share your Google Sheet with the service account email (`...@....iam.gserviceaccount.com`)
+4. Share your Google Sheet (using the ID from `GOOGLE_SHEETS_ID`) with the service account email (`...@....iam.gserviceaccount.com`)
 
 The pipeline expects a Google Sheet with these tabs:
 - **Competitors** — MUA/profiles from hashtags
 - **Vendor** — Wedding vendors (fotografer, catering, etc.)
 - **Client** — Potential clients found via comment analysis
 - **VendorHashtags** — Hashtags to scan (add hashtags in column B with status `OK` or `NEW`)
+
+> **Note:** Copy your Google Sheets ID from the URL: `docs.google.com/spreadsheets/d/YOUR_SHEETS_ID_HERE/edit`
 
 ### 4. Run
 

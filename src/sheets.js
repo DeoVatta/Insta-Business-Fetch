@@ -12,9 +12,9 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { isIndonesian } from './classifier.js';
+import { SHEETS_ID } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SHEETS_ID = '1xljNVmDBRHTVI7kQUCE4ALfc1Fbzue9-kiyHA0lYGwM';
 
 const COMPETITORS_HEADER = [
     'No', 'Display Name', 'Profile URL', 'Username', 'Location', 'Region',
@@ -93,6 +93,13 @@ async function writeHeaders() {
 
 async function initSheets() {
     if (sheetsClient) return sheetsClient;
+
+    if (!SHEETS_ID) {
+        console.warn('[SHEETS] GOOGLE_SHEETS_ID not set — running in dry-run mode (no data will be written)');
+        sheetsClient = null;
+        return null;
+    }
+
     console.log('[SHEETS] Initializing...');
     try {
         const credPath = path.join(__dirname, '..', 'gcp-service-account.json');

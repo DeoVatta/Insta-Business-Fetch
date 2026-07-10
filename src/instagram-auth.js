@@ -1,7 +1,7 @@
 /**
  * Instagram Prospector - Auto cookie refresh via Playwright login
  *
- * Reads IG_USERNAME + IG_PASSWORD from .env file.
+ * Reads IG_USERNAME + IG_PASSWORD from config.js (loaded from .env).
  * If cookies are invalid/expired, auto-login and save new cookies.
  */
 
@@ -9,14 +9,12 @@ import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import dotenv from 'dotenv';
-
-dotenv.config();
+import { IG_USERNAME, IG_PASSWORD } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const COOKIES_FILE = path.join(__dirname, '..', 'instagram-cookies.json');
-const IG_USERNAME = process.env.IG_USERNAME || '';
-const IG_PASSWORD = process.env.IG_PASSWORD || '';
+const USERNAME = IG_USERNAME;
+const PASSWORD = IG_PASSWORD;
 
 async function saveCookies(cookies) {
     const fixed = cookies.map(c => ({
@@ -183,12 +181,12 @@ export async function ensureAuth() {
         console.log('[AUTH] Session expired — will refresh');
     }
 
-    if (!IG_USERNAME || !IG_PASSWORD) {
-        console.log('[AUTH] No sessionid and no credentials — update .env or instagram-cookies.json');
+    if (!USERNAME || !PASSWORD) {
+        console.log('[AUTH] No sessionid and no credentials — update .env (IG_USERNAME + IG_PASSWORD)');
         process.exit(1);
     }
 
-    const newCookies = await loginInstagram(IG_USERNAME, IG_PASSWORD);
+    const newCookies = await loginInstagram(USERNAME, PASSWORD);
     if (newCookies) {
         await saveCookies(newCookies);
         return newCookies;
