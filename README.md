@@ -8,13 +8,13 @@ Automated Instagram business data extractor for Indonesian bridal/makeup market.
 index.js              — Main pipeline orchestrator
 src/
   state.js           — Persistence + auto-resume (discovery-state.json)
-  scraper.js         — Playwright + GraphQL + oEmbed
+  scraper.js         — Playwright browser automation (hashtag scrape, post enrich, oEmbed)
   instagram-auth.js   — Auto cookie refresh via Playwright login
   enricher.js         — Profile enrichment + 20 posts enrichment
   classifier.js       — Account type + location detection (Indonesian)
   comments.js         — GraphQL comment extraction + client scoring
   ai-classifier.js   — AI batch classification via Olagon Gateway
-  sheets.js           — Google Sheets read/write (append mode)
+  sheets.js           — Google Sheets read/write (append mode, buffered batch)
   config.js           — All constants
 ```
 
@@ -55,11 +55,11 @@ OLAGON_BASE_URL=https://gateway.olagon.site
 **Sheet 1 — Instagram (A-L):**
 | Col | Header | Description |
 |-----|--------|-------------|
-| A | No | ROW()-1 (manual formula) |
+| A | No | ROW()-1 formula |
 | B | Nama | Instagram Display Name |
 | C | Instagram | Profile URL |
-| D | Whatsapp | WhatsApp number (AI-extracted) |
-| E | Website | Website URL (AI-extracted) |
+| D | Whatsapp | WhatsApp number (extracted from bio) |
+| E | Website | Website URL (extracted from bio) |
 | F | Category | Business category (AI-classified) |
 | G | Followers | Follower count |
 | H | Post | Number of posts |
@@ -71,7 +71,7 @@ OLAGON_BASE_URL=https://gateway.olagon.site
 **Sheet 2 — Hashtags (A-D):**
 | Col | Header | Description |
 |-----|--------|-------------|
-| A | No | ROW()-1 (manual formula) |
+| A | No | ROW()-1 formula |
 | B | Hashtag | Hashtag name (e.g. #muasemarang) |
 | C | Found | Times this hashtag was found |
 | D | Status | Pending / Executing / Executed |
@@ -80,7 +80,7 @@ OLAGON_BASE_URL=https://gateway.olagon.site
 
 Instagram requires a valid `sessionid` cookie. Two options:
 
-### Option 1: Manual Login (Recommended for new accounts)
+### Option 1: Manual Login (Recommended)
 ```bash
 node manual-auth.mjs
 ```
@@ -112,7 +112,7 @@ The program runs **24/7 non-stop**. It processes hashtags sequentially, and resu
   └─ If not → Fresh start
 
 [PER HASHTAG]
-  Phase 1: Scrape hashtag → get all post URLs
+  Phase 1: Scrape hashtag page → get all post URLs (scrollTo bottom + waitForSelector img)
   Phase 2: For each post:
     - Enrich post (username, caption, hashtags, mentions, collabs)
     - Collect hashtags → add to state
@@ -122,14 +122,37 @@ The program runs **24/7 non-stop**. It processes hashtags sequentially, and resu
       → add to queue (depth+1)
     - Extract comments → filter clients → write immediately
     - Save state every 10 profiles
-  Phase 3: AI classify collected hashtags → write business ones to sheet
+  Phase 3: AI classify collected hashtags → write business ones to Hashtags sheet
   Phase 4: Process discovery queue (depth 2, 3, 4)
     - Full nested enrichment for each queued profile
     - Save state every 10 profiles
   Mark hashtag Executed → next hashtag
 
-[REPEAT] Until all hashtags done → then wait or stop
+[REPEAT] Until all hashtags done → then reset to Pending for re-scan
 ```
+
+## Pipeline Phases
+
+### Phase 1: Hashtag Scrape
+- URL: `https://www.instagram.com/explore/tags/{hashtag}/`
+- Scroll: `scrollTo(0, document.body.scrollHeight)` + wait for images
+- Selector: `article a[href*="/p/"]` with broader fallback
+- Stop: 8 consecutive empty scrolls OR 50 max scrolls
+- **Confirmed: ~66 posts per hashtag (tested #umkm)**
+
+### Phase 2: Post & Profile Enrichment
+- oEmbed API: enrich posts (username, caption, hashtags, mentions, collabs)
+- Profile enrichment: bio, followers, category, location
+- Nested enrichment: 20 posts per profile
+- Comment extraction: GraphQL API (may return 302 on some accounts)
+
+### Phase 3: AI Hashtag Classification
+- Batch classify collected hashtags via AI (Olagon Gateway)
+- Write business-related hashtags to Hashtags sheet
+
+### Phase 4: Discovery Queue (Depth 2-4)
+- Process profiles discovered from mentions/collabs
+- Full nested enrichment at each depth level
 
 ## Nested Depth Discovery
 
@@ -153,10 +176,10 @@ Depth 4: Profiles from depth 3 mentions/collabs
 
 **State file:** `discovery-state.json`
 
-```
+```json
 {
   "version": 1,
-  "savedAt": "2026-07-10T...",
+  "savedAt": "2026-07-11T...",
   "currentHashtag": "#muasemarang",
   "currentPhase": "profile-nested",
   "queue": [...],
@@ -186,6 +209,12 @@ $ node index.js
 
 **Crash recovery:** Max 10 profiles lost (last save interval).
 
+## Sheets Buffer System
+
+Profiles are buffered in memory and flushed to Google Sheets every 10 profiles OR every 30 seconds (whichever comes first). On flush, all buffered profiles are AI-classified in a single batch, then written to Sheets via one API call.
+
+**Why:** Google Sheets has a 60 writes/minute quota. Batching avoids hitting this limit.
+
 ## AI Classification
 
 **Claude Haiku** via Olagon Gateway (no thinking block):
@@ -199,34 +228,16 @@ $ node index.js
 
 AI extracts: Category, Location (city), WhatsApp, Website, Engagement rate.
 
-## Batch System
+## Known Issues
 
-Profiles are buffered and written to sheet every 10 profiles via AI batch classification. Comment extraction writes immediately per post.
-
-## Key Features
-
-- **24/7 non-stop**: Runs forever, resumes on restart
-- **Nested depth 4**: Full enrichment of 20 posts per profile at every depth level
-- **Persistence**: Auto-save to `discovery-state.json`, auto-resume on crash
-- **Immediate write**: Every batch written to sheet immediately — progress visible in real-time
-- **AI hashtag filter**: Only business-related hashtags enter the queue
-- **Indonesian-only**: Skips non-Indonesian accounts
-- **Atomic saves**: Write to .tmp → rename to .json (no corruption on crash)
-
-## Clear State (Fresh Start)
-
-```bash
-# Delete state file
-rm discovery-state.json
-```
-
-Or add to config: `CLEAR_STATE=true node index.js`
+- **GraphQL comments 302**: Some requests return 302 redirect — comment extraction may be empty for some posts. Non-blocking.
+- **Sheet ensure error**: "Request contains an invalid argument" on first run — sheets still connected and functional.
 
 ## Troubleshooting
 
-**GraphQL comments returning errors:**
+**Session expired:**
 ```bash
-node -e "import('./src/instagram-auth.js').then(m => m.ensureAuth())"
+node manual-auth.mjs
 ```
 
 **Dry-run mode:** Pipeline runs dry-run if `gcp-service-account.json` is missing — all writes printed to console.
@@ -237,7 +248,19 @@ node -e "import('./src/instagram-auth.js').then(m => m.ensureAuth())"
 ```
 State resets automatically. Progress up to last save point is lost.
 
+**Hashtag scraping returns 0 posts:**
+- Cookie may be expired → run `node manual-auth.mjs`
+- Instagram may be blocking → try refreshing session
+
 **Quota monitoring:** Check `[AI]` log lines for batch counts.
+
+## Clear State (Fresh Start)
+
+```bash
+rm discovery-state.json
+```
+
+Or add to config: `CLEAR_STATE=true node index.js`
 
 ## License
 
