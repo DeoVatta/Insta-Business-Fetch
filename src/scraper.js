@@ -776,59 +776,71 @@ function buildFallbackProfile(username) {
 
 // ============== SCRAPE HASHTAG ==============
 /**
- * Scrape hashtag page via _sharedData JSON — fastest method, no per-post navigation.
- * Instagram embeds hashtag posts in window._sharedData on the search page.
+ * Scrape hashtag page via Playwright + DOM extraction.
+ * Uses /explore/tags/ page + scroll for maximum post yield.
  */
 async function scrapeHashtag(hashtag, maxPosts = 200) {
     if (!_page) await initBrowser();
 
     console.log(`[HASHTAG] #${hashtag}`);
     const cleanTag = hashtag.replace(/^#/, '');
-    const searchUrl = `https://www.instagram.com/explore/search/keyword/?q=%23${encodeURIComponent(cleanTag)}`;
+    // Use hashtag page — higher post yield than keyword search
+    const searchUrl = `https://www.instagram.com/explore/tags/${encodeURIComponent(cleanTag)}/`;
 
     await _page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 40000 });
 
-    // Wait for React to render posts (img inside post links)
+    // Wait for React to render initial posts
     try {
-        await _page.waitForSelector('a[href*="/p/"] img', { timeout: 20000 });
+        await _page.waitForSelector('a[href*="/p/"]', { timeout: 20000 });
     } catch (e) {
         console.log(`  [WARN] No posts appeared — page may be blocked`);
     }
-    await _page.waitForTimeout(1000);
+    await _page.waitForTimeout(2000);
 
-    // Scroll to load more posts (lazy loading)
+    // Scroll to load more posts (lazy loading — Instagram loads ~12 posts per scroll)
     let prevCount = 0;
+    let consecutiveEmpty = 0; // scrolls in a row with no new posts
     let scrollCount = 0;
     const maxScrolls = MAX_SCROLL_HASHTAG || 50;
-    // post limit: config value, or null = unlimited (use very large number)
-    const postLimit = (POSTS_PER_HASHTAG !== null && POSTS_PER_HASHTAG !== undefined) ? POSTS_PER_HASHTAG : 999999;
 
     while (scrollCount < maxScrolls) {
-        const urls = await _page.$$eval('a[href*="/p/"]',
+        // Use article divs (more reliable on hashtag page)
+        const urls = await _page.$$eval('article a[href*="/p/"]',
             els => [...new Set(els.map(e => e.href.split('?')[0]))]);
         const currentCount = urls.length;
 
-        if (currentCount >= postLimit) break;
-        if (currentCount === prevCount && scrollCount > 3) break;
+        // Stop only after 8 consecutive scrolls with no new posts (truly exhausted)
+        if (currentCount > 0 && currentCount === prevCount) {
+            consecutiveEmpty++;
+            if (consecutiveEmpty >= 8) {
+                console.log(`  [SCROLL] No new posts for 8 scrolls — stopping at ${currentCount}`);
+                break;
+            }
+        } else {
+            consecutiveEmpty = 0; // reset when new posts appear
+        }
+
+        // Also stop if stuck at 0 posts for too long
+        if (currentCount === 0 && scrollCount > 5) {
+            console.log(`  [SCROLL] 0 posts after ${scrollCount} scrolls — stopping`);
+            break;
+        }
 
         prevCount = currentCount;
-        await _page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        // Wait for React to render new posts after scroll
-        try {
-            await _page.waitForSelector('a[href*="/p/"] img', { timeout: 8000 });
-        } catch (e) { /* timed out, will count anyway */ }
-        await _page.waitForTimeout(1000);
+        // Scroll by 2x viewport height — smoother and faster
+        await _page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
+        await _page.waitForTimeout(1500);
         scrollCount++;
     }
 
-    // Extract post URLs (for reference)
-    const postUrls = await _page.$$eval('a[href*="/p/"]',
+    // Extract post URLs
+    const postUrls = await _page.$$eval('article a[href*="/p/"]',
         els => [...new Set(els.map(e => e.href.split('?')[0]))]);
 
     console.log(`  Found ${postUrls.length} post URLs (${scrollCount} scrolls)`);
     if (postUrls.length === 0) return [];
 
-    // Phase 1B: Enrich all post URLs with oEmbed (parallel, ~2000 posts/min, public API)
+    // Enrich all post URLs with oEmbed (parallel, ~2000 posts/min, public API)
     console.log(`  Enriching ${postUrls.length} posts via oEmbed...`);
     const enriched = await enrichPostsBatch(postUrls.slice(0, maxPosts));
     console.log(`  Enriched ${enriched.length}/${postUrls.length} posts`);
