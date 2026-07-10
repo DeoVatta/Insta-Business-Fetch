@@ -1,0 +1,16 @@
+{
+  "name": "insta-business-fetch",
+  "version": "1.0.0",
+  "description": "Automated Instagram business data extractor — classifies MUA/wedding profiles, discovers hashtags, finds clients via comment analysis",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "scan": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.0",
+    "googleapis": "^140.0.0",
+    "google-auth-library": "^9.0.0",
+    "playwright": "^1.50.0"
+  }
+}

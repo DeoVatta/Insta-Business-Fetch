@@ -1,0 +1,5 @@
+node_modules/
+.env
+gcp-service-account.json
+instagram-cookies.json
+*.log
