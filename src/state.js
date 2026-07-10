@@ -109,10 +109,18 @@ async function saveStateInternal() {
 
     try {
         const data = JSON.stringify(state, null, 0);
-        fs.writeFileSync(STATE_TMP, data, 'utf8');
-        fs.renameSync(STATE_TMP, STATE_FILE);
+        // Use direct write instead of atomic rename — Windows locks files unpredictably
+        fs.writeFileSync(STATE_FILE, data, 'utf8');
     } catch (e) {
-        console.warn(`[STATE] Save error: ${e.message}`);
+        // Fallback: try remove + write
+        try {
+            if (fs.existsSync(STATE_FILE)) {
+                fs.unlinkSync(STATE_FILE);
+            }
+            fs.writeFileSync(STATE_FILE, data, 'utf8');
+        } catch (e2) {
+            console.warn(`[STATE] Save failed: ${e2.message}`);
+        }
     } finally {
         pendingSave = false;
     }
@@ -271,7 +279,7 @@ export function bufferProfile(profile) {
 }
 
 export function getProfileBuffer() {
-    return state.profileBuffer;
+    return state ? state.profileBuffer : [];
 }
 
 export function clearProfileBuffer() {
