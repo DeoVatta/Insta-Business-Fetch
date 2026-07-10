@@ -76,6 +76,24 @@ OLAGON_BASE_URL=https://gateway.olagon.site
 | C | Found | Times this hashtag was found |
 | D | Status | Pending / Executing / Executed |
 
+## Auth Setup (Required First)
+
+Instagram requires a valid `sessionid` cookie. Two options:
+
+### Option 1: Manual Login (Recommended for new accounts)
+```bash
+node manual-auth.mjs
+```
+A visible browser opens. Log in manually, complete any email/SMS verification. Cookies are saved automatically once sessionid is detected.
+
+### Option 2: Auto-Login (May trigger reCAPTCHA)
+```bash
+node index.js
+```
+Uses Playwright to fill credentials and log in. If Instagram shows a reCAPTCHA challenge, use Option 1 instead.
+
+**Important:** Instagram may require manual verification (email/SMS) especially for accounts without phone verification or new logins. Complete verification in the browser window.
+
 ## Running
 
 ```bash
