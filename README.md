@@ -1,18 +1,19 @@
 # Insta-Business-Fetch
 
-Automated Instagram business data extractor for the Indonesian bridal/makeup artist market. Classifies MUA and wedding vendor profiles, discovers hashtags, and finds potential clients via comment analysis.
+Automated Instagram business data extractor for Indonesian bridal/makeup market. Classifies profiles, discovers hashtags, and finds potential clients via comment analysis.
 
 ## Architecture
 
 ```
-index.js              — Main pipeline orchestrator (Phase 1–11)
+index.js              — Main pipeline orchestrator
 src/
   scraper.js          — Playwright + GraphQL + oEmbed (no external IG lib)
   instagram-auth.js   — Auto cookie refresh via Playwright login
   enricher.js         — Profile enrichment + classification
   classifier.js       — Account type + location detection (Indonesian)
   comments.js         — GraphQL comment extraction + client scoring
-  sheets.js           — Google Sheets read/write (append mode, mutex locks)
+  ai-classifier.js    — AI batch classification via Olagon Gateway
+  sheets.js           — Google Sheets read/write (append mode)
   config.js           — All constants
 ```
 
@@ -34,8 +35,6 @@ npm install
 
 ### 2. Environment variables
 
-Copy `.env.example` to `.env`:
-
 ```bash
 cp .env.example .env
 ```
@@ -45,18 +44,18 @@ Edit `.env`:
 IG_USERNAME=your_instagram_username
 IG_PASSWORD=your_instagram_password
 GOOGLE_SHEETS_ID=your_google_sheets_id_here
+OLAGON_API_KEY=your_olagon_api_key_here
+OLAGON_BASE_URL=https://gateway.olagon.site
 ```
 
 ### 3. Google Sheets service account
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com) → IAM → Service Accounts
 2. Create a service account, download the JSON key
-3. Save it as `gcp-service-account.json` in the project root
-4. Share your Google Sheet (using the ID from `GOOGLE_SHEETS_ID`) with the service account email (`...@....iam.gserviceaccount.com`)
+3. Save it as `gcp-service-account.json`
+4. Share your Google Sheet with the service account email (`...@....iam.gserviceaccount.com`)
 
-The pipeline expects a Google Sheet with one tab: **Instagram**. All data (competitors, vendors, clients) goes into this single sheet — no sheet splitting. The pipeline auto-creates the "Instagram" sheet tab if it doesn't exist.
-
-The pipeline expects a Google Sheet with two tabs:
+The pipeline expects two tabs:
 
 **Sheet 1 — Instagram (A-L):**
 | Col | Header | Description |
@@ -82,30 +81,6 @@ The pipeline expects a Google Sheet with two tabs:
 | C | Found | Times this hashtag was found |
 | D | Status | Pending / Executing / Executed |
 
-Add hashtags to the Hashtags sheet with status `Pending`. AI classifies them at end of each run — only writes to this sheet if the hashtag is business-related.
-
-## AI Classification
-
-The pipeline uses **Claude Haiku** via Olagon Gateway for batch AI classification. Key limits tested:
-
-| Metric | Value |
-|--------|-------|
-| Max profiles per request | **150** |
-| Output token limit | 8,192 |
-| Weekly quota | ~5 hours |
-| Estimated profiles/week | ~7,200 (150 × 48 runs) |
-| Typical response time | 15-25s per batch |
-
-**AI does:** Category, Location (city only), WhatsApp extraction, Website extraction, Engagement analysis.
-
-**Config:** Set in `.env`:
-```
-OLAGON_API_KEY=your_olagon_api_key_here
-OLAGON_BASE_URL=https://gateway.olagon.site
-```
-
-AI runs as Phase 5 — collects up to 150 enriched profiles, sends one batch request, then writes all AI results to the sheet. Falls back to regex extraction if AI fails.
-
 > **Note:** Copy your Google Sheets ID from the URL: `docs.google.com/spreadsheets/d/YOUR_SHEETS_ID_HERE/edit`
 
 ### 4. Run
@@ -114,40 +89,98 @@ AI runs as Phase 5 — collects up to 150 enriched profiles, sends one batch req
 node index.js
 ```
 
-The pipeline processes one hashtag per run. On completion it marks the hashtag as "Executed" in the G column of VendorHashtags. Re-run to process the next hashtag.
+The program processes **one hashtag per run**. Add hashtags to the Hashtags sheet with status `Pending`. Each run discovers new hashtags — they are queued automatically for future runs.
 
-## Pipeline Phases
+## Pipeline Flow
 
-| Phase | Description |
-|-------|-------------|
-| 1 | Scrape hashtag → collect all post URLs + oEmbed data |
-| 2–6 | Loop posts: enrich profile → classify → write to sheet |
-| 7 | Collect last 20 posts for comment extraction |
-| 8 | GraphQL comment extraction → filter clients → write |
-| 9 | Collab/mention queue → enrich → write (depth up to 2) |
-| 10 | Re-login every 20 posts to refresh session cookies |
+```
+Sheet Hashtags → Pick first Pending → Process →
+  Collect profiles (batch 10) → AI classify → WRITE immediately
+  Collect hashtags → AI filter (business only) → Queue as Pending
+Mark Executed → Next Pending hashtag → repeat
+```
+
+| Phase | Action |
+|-------|--------|
+| 1 | Scrape hashtag (Playwright scroll) |
+| 2 | Enrich posts + collect hashtags |
+| 3 | AI classify hashtags (business only) → write to Hashtags sheet |
+| 4 | Enrich profiles → buffer 10 → AI batch → WRITE immediately |
+| 5 | Comment extraction → client discovery |
+| 6 | Discovery queue (batch 10 → WRITE immediately) |
+| 7 | Re-login every 20 posts |
+
+## Queue System
+
+The program builds a self-growing hashtag queue:
+
+```
+#muasemarang | Pending  ← you add this
+    ↓ Run #1
+#muasemarang | Executed
+#wosemarang  | Pending  ← discovered by AI, queued for next run
+#bridaljogja | Pending  ← discovered by AI, queued
+    ↓ Run #2
+#wosemarang  | Executed
+#bridaljogja| Pending  ← you add this manually or let it grow
+#muasolo     | Pending  ← discovered, queued
+    ↓ ...
+```
+
+- **Pending** = ready to be processed (user input OR AI discovery)
+- **Executing** = currently being processed
+- **Executed** = completed
+
+Loop continues until no more Pending hashtags remain.
+
+## AI Classification
+
+**Claude Haiku** via Olagon Gateway. Key limits:
+
+| Metric | Value |
+|--------|-------|
+| Max profiles per request | 150 (using 10 for visibility) |
+| Max hashtags per request | 200 |
+| Weekly quota | ~5 hours |
+| Profiles/week (batch 10) | ~3,000+ |
+
+AI does:
+- **Profile**: Category, Location (city only), WhatsApp, Website, Engagement rate
+- **Hashtag**: Business-related or not? Only business hashtags are queued
+
+## Batch System
+
+Profile batch = **10 profiles**. Every 10 profiles enriched → AI batch → **written to sheet immediately**.
+
+```
+Enrich 10 profiles (~5 min) → AI batch (~20s) → 10 rows appear in sheet
+Enrich next 10 profiles → AI → 10 more rows
+...progress visible in real-time
+```
+
+Discovery queue: same pattern (batch 10, write immediately).
 
 ## Key Features
 
-- **Auto-retry on GraphQL auth failure** — stale sessionid triggers re-auth automatically
-- **Indonesian-only filtering** — skips non-Indonesian accounts using city/word detection
-- **Real-time write** — every result is written to Sheets immediately (no batch delay)
-- **No external IG library** — uses Playwright + oEmbed + GraphQL directly
-- **Sessionid valid ~362 days** — no mid-run login needed (configured in .env)
+- **Queue system**: Self-growing hashtag discovery — each run expands the queue
+- **Immediate write**: Every batch → rows appear in sheet immediately (no waiting until end)
+- **AI hashtag filter**: Only business-related hashtags enter the queue
+- **Indonesian-only**: Skips non-Indonesian accounts via city/word detection
+- **Auto-retry on GraphQL failure**: Stale sessionid triggers re-auth automatically
+- **Sessionid valid ~362 days**: No mid-run login needed
 
 ## Troubleshooting
 
 **GraphQL comments returning errors:**
-The scraper now auto-retries with fresh auth on 401/403. If it keeps failing, re-harvest cookies:
 ```bash
 node -e "import('./src/instagram-auth.js').then(m => m.ensureAuth())"
 ```
 
-**"No approved hashtags" error:**
-Add hashtags to the `VendorHashtags` sheet column B with status `OK` or `NEW` in column F.
-
 **Dry-run mode (no Sheets):**
-If `gcp-service-account.json` is missing, the pipeline runs in dry-run mode and prints all writes to console.
+Pipeline runs in dry-run mode if `gcp-service-account.json` is missing — all writes printed to console.
+
+**Quota monitoring:**
+Check `[AI]` log lines for batch counts. With batch 10, ~45 API calls per 5-hour run (well within 500 limit).
 
 ## License
 
