@@ -1,8 +1,8 @@
 /**
  * Instagram Prospector - Google Sheets Integration
  *
- * Single "Instagram" sheet for all data — no sheet splitting.
- * Auto-creates sheet if missing. Append mode (insertDataOption: INSERT_ROWS).
+ * Single "Instagram" sheet. Auto-creates sheet + header if not found.
+ * Header check: reads row 1, if not matching expected headers, overwrites with correct ones.
  */
 
 import { google } from 'googleapis';
@@ -14,17 +14,25 @@ import { SHEETS_ID } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Unified header for all scraped data
+// Expected header columns A-L
 const SHEET_HEADER = [
-    'No', 'Profile URL', 'Username', 'Via', 'Source Hashtag',
-    'Type', 'Category', 'Display Name', 'Location',
-    'Followers', 'Following', 'Posts', 'Engagement %',
-    'Bio', 'Hashtags', 'Mentions', 'Collabs',
-    'Comment Text', 'Date Scraped'
+    'No',       // A: ROW()-1 formula
+    'Nama',     // B: Display Name
+    'Instagram',// C: Profile URL
+    'Whatsapp', // D: WhatsApp number
+    'Website',  // E: Website URL
+    'Category', // F: Business category
+    'Followers',// G: Follower count
+    'Post',     // H: Post count
+    'Location', // I: Business location
+    'Last Post',// J: URL of last post
+    'Analytics',// K: Engagement rate
+    'Status',   // L: Manual user input
 ];
 
-// Column count
-const END_COL = 'S'; // columns A–S
+// Number of columns
+const NUM_COLS = SHEET_HEADER.length; // 12
+const END_COL = 'L';
 
 // ===== INIT =====
 let sheetsClient = null;
@@ -34,7 +42,7 @@ async function initSheets() {
     if (sheetsClient && sheetInitialized) return sheetsClient;
 
     if (!SHEETS_ID) {
-        console.warn('[SHEETS] GOOGLE_SHEETS_ID not set — running in dry-run mode');
+        console.warn('[SHEETS] GOOGLE_SHEETS_ID not set — dry-run mode');
         sheetsClient = null;
         return null;
     }
@@ -48,75 +56,70 @@ async function initSheets() {
         const authClient = await auth.getClient();
         sheetsClient = google.sheets({ version: 'v4', auth: authClient });
 
-        // Ensure "Instagram" sheet exists
         await ensureInstagramSheet();
         sheetInitialized = true;
-
-        console.log('[SHEETS] Connected — single "Instagram" sheet');
+        console.log('[SHEETS] Connected — "Instagram" sheet ready');
     } catch (e) {
-        console.log(`[SHEETS] Auth error: ${e.message}`);
-        console.warn('[SHEETS] Running in dry-run mode (no data will be written)');
+        console.warn(`[SHEETS] Auth error: ${e.message} — dry-run mode`);
         sheetsClient = null;
     }
 
     return sheetsClient;
 }
 
-// Auto-create "Instagram" sheet tab if it doesn't exist
+// Ensure "Instagram" sheet exists, check/fix header row
 async function ensureInstagramSheet() {
+    // Try to create sheet if missing
     try {
-        // Try to read existing sheet list
         const meta = await sheetsClient.spreadsheets.get({
             spreadsheetId: SHEETS_ID,
             fields: 'sheets.properties(sheetId,name)'
         });
         const existing = meta.data.sheets || [];
-        const hasInstagram = existing.some(s => s.properties.name === 'Instagram');
+        const igSheet = existing.find(s => s.properties.name === 'Instagram');
 
-        if (!hasInstagram) {
-            // Create new sheet tab named "Instagram"
+        if (!igSheet) {
             await sheetsClient.spreadsheets.batchUpdate({
                 spreadsheetId: SHEETS_ID,
                 resource: {
-                    requests: [{
-                        addSheet: {
-                            properties: { title: 'Instagram', index: 0 }
-                        }
-                    }]
+                    requests: [{ addSheet: { properties: { title: 'Instagram', index: 0 } } }]
                 }
             });
-            console.log('[SHEETS] Created new "Instagram" sheet');
+            console.log('[SHEETS] Created "Instagram" sheet');
         }
     } catch (e) {
-        // If spreadsheet itself doesn't exist, create it
         if (e.message?.includes('404') || e.message?.includes('not found')) {
-            console.warn('[SHEETS] Spreadsheet not found — create one and set GOOGLE_SHEETS_ID');
+            console.warn('[SHEETS] Spreadsheet not found — check GOOGLE_SHEETS_ID');
             sheetsClient = null;
-            return;
         }
-        console.log(`[SHEETS] Sheet check warning: ${e.message}`);
+        console.warn(`[SHEETS] Sheet check: ${e.message}`);
     }
 
-    // Write header row to Instagram sheet (row 1)
+    // Check row 1 header
     try {
-        const existing = await sheetsClient.spreadsheets.values.get({
+        const res = await sheetsClient.spreadsheets.values.get({
             spreadsheetId: SHEETS_ID,
-            range: 'Instagram!A1:A1'
+            range: `Instagram!A1:${END_COL}1`
         });
-        // Only write header if A1 is empty
-        if (!existing.data.values?.[0]?.[0]) {
+        const existingHeader = res.data.values?.[0] || [];
+
+        const needsHeader = existingHeader.length === 0 ||
+            !existingHeader[0]?.toLowerCase().startsWith('no') ||
+            existingHeader.length < NUM_COLS;
+
+        if (needsHeader) {
             await sheetsClient.spreadsheets.values.update({
                 spreadsheetId: SHEETS_ID,
                 range: `Instagram!A1:${END_COL}1`,
                 valueInputOption: 'RAW',
                 resource: { values: [SHEET_HEADER] }
             });
-            console.log('[SHEETS] Header row written to "Instagram" sheet');
+            console.log('[SHEETS] Header row written: No | Nama | Instagram | Whatsapp | Website | Category | Followers | Post | Location | Last Post | Analytics | Status');
         } else {
-            console.log('[SHEETS] "Instagram" sheet already has data — appending');
+            console.log('[SHEETS] Header row OK');
         }
     } catch (e) {
-        console.log(`[SHEETS] Header write error: ${e.message}`);
+        console.warn(`[SHEETS] Header check error: ${e.message}`);
     }
 }
 
@@ -131,28 +134,33 @@ async function readRange(range) {
     }
 }
 
-// Read hashtags from the first column of Instagram sheet (column A, rows 2+)
+// Read visited usernames (column C = Instagram URL)
+async function readVisitedProfiles() {
+    const visited = new Set();
+    const rows = await readRange(`Instagram!C2:C5000`);
+    for (const row of rows) {
+        if (row[0]) {
+            const url = row[0];
+            // Extract username from URL like https://www.instagram.com/username/
+            const match = url.match(/instagram\.com\/([^\/]+)/i);
+            if (match) visited.add(match[1].toLowerCase());
+        }
+    }
+    console.log(`[SHEETS] Loaded ${visited.size} visited profiles`);
+    return visited;
+}
+
+// Read hashtags from column A (rows 2+) — values starting with #
 async function readHashtags() {
-    const rows = await readRange('Instagram!A2:A2000');
+    const rows = await readRange(`Instagram!A2:A2000`);
     const hashtags = [];
     for (const row of rows) {
         if (row[0] && row[0].startsWith('#')) {
             hashtags.push(row[0]);
         }
     }
-    console.log(`[SHEETS] Loaded ${hashtags.length} hashtags from sheet`);
+    console.log(`[SHEETS] Loaded ${hashtags.length} hashtags`);
     return hashtags;
-}
-
-// Read visited usernames (column C = Username)
-async function readVisitedProfiles() {
-    const visited = new Set();
-    const rows = await readRange('Instagram!C2:C5000');
-    for (const row of rows) {
-        if (row[0]) visited.add(row[0].replace('@', '').trim().toLowerCase());
-    }
-    console.log(`[SHEETS] Loaded ${visited.size} visited profiles`);
-    return visited;
 }
 
 // ===== WRITE =====
@@ -173,7 +181,6 @@ async function writeRange(range, values) {
     }
 }
 
-// Append a single row to Instagram sheet
 async function appendRow(values) {
     if (!sheetsClient) {
         console.log(`[SHEETS DRY] Instagram APPEND:`, JSON.stringify(values).slice(0, 200));
@@ -194,96 +201,120 @@ async function appendRow(values) {
     }
 }
 
-// Single unified write function for all profile data
+// Extract WhatsApp number from bio text
+function extractWhatsApp(bio = '') {
+    const patterns = [
+        /(\+62[\s\-.]?\d{2,4}[\s\-.]?\d{3,4}[\s\-.]?\d{3,4})/g,
+        /(08\d{2}[\s\-.]?\d{3,4}[\s\-.]?\d{3,4})/g,
+        /(wa\.me\/\+?\d+)/gi,
+        /(whatsapp[:\s]+[\+\d]/gi,
+        /(\+62\d{8,12})/g,
+    ];
+    for (const pat of patterns) {
+        const m = bio.match(pat);
+        if (m) {
+            // Clean: remove spaces, dots, dashes
+            const num = m[0].replace(/[^\d+]/g, '');
+            if (num.length >= 10) return num;
+        }
+    }
+    return '';
+}
+
+// Extract website URL from bio
+function extractWebsite(bio = '') {
+    const m = bio.match(/https?:\/\/[^\s]+/i);
+    return m ? m[0] : '';
+}
+
+// Get engagement rate display string
+function formatAnalytics(followers, likes, comments) {
+    if (!followers || followers === 0) return 'N/A';
+    const rate = ((likes + comments) / followers * 100).toFixed(2);
+    return `${rate}% (${likes}❤ + ${comments}💬)`;
+}
+
+// Unified write — all fields match column headers
 async function writeProfile(profile, existingUsernames) {
     if (!profile || !profile.username) return;
 
-    const username = profile.username.toLowerCase().replace('@', '');
+    const username = profile.username.replace('@', '').toLowerCase();
     if (existingUsernames.has(username)) {
         console.log(`  [SKIP] @${username} already saved`);
         return;
     }
 
-    const today = new Date().toISOString().split('T')[0];
+    const bio = profile.bio || '';
+    const wa = extractWhatsApp(bio);
+    const website = extractWebsite(bio);
 
-    // Unified row: match SHEET_HEADER column order
+    // Row matches SHEET_HEADER: No|A|Nama|B|Instagram|C|Whatsapp|D|Website|E|Category|F|Followers|G|Post|H|Location|I|Last Post|J|Analytics|K|Status|L
     const row = [
-        '',                                          // No (auto-numbered by Sheets)
-        profile.profileUrl || `https://instagram.com/${username}/`,  // Profile URL
-        `@${username}`,                              // Username
-        profile.via || 'hashtag',                    // Via
-        profile.sourceHashtag || '',                  // Source Hashtag
-        profile.type || 'client',                     // Type
-        profile.category || '',                       // Category
-        profile.displayName || username,             // Display Name
-        profile.location || '',                       // Location
-        profile.followers || 0,                       // Followers
-        profile.following || 0,                       // Following
-        profile.posts || 0,                          // Posts
-        profile.engagementRate || 'N/A',             // Engagement %
-        (profile.bio || '').slice(0, 300),           // Bio
-        [...(profile.hashtags || [])].join(' '),    // Hashtags
-        [...(profile.mentions || [])].slice(0, 20).join(', '),  // Mentions
-        [...(profile.collabs || [])].slice(0, 10).join(', '),   // Collabs
-        (profile.commentText || profile.text || '').slice(0, 300), // Comment Text
-        today,                                        // Date Scraped
+        '',                                      // A: No — empty, Sheets auto-increments
+        profile.displayName || username,         // B: Nama
+        profile.profileUrl || `https://instagram.com/${username}/`,  // C: Instagram
+        wa,                                      // D: Whatsapp
+        website,                                 // E: Website
+        profile.category || '',                  // F: Category
+        profile.followers || 0,                  // G: Followers
+        profile.posts || 0,                      // H: Post
+        profile.location || '',                  // I: Location
+        profile.lastPostUrl || '',               // J: Last Post
+        formatAnalytics(profile.followers, profile.postLikes || 0, profile.postComments || 0), // K: Analytics
+        'Pending',                               // L: Status (user fills in manually)
     ];
 
     const ok = await appendRow(row);
     if (ok) {
         existingUsernames.add(username);
-        console.log(`  [SAVED] @${username} → ${profile.type || 'client'} | ${profile.category || '-'}`);
+        console.log(`  [SAVED] @${username} | ${profile.category || '-'} | ${wa || 'no WA'}`);
     } else {
         console.log(`  [FAIL] @${username} write failed`);
     }
 }
 
-// Write client found via comment (convenience wrapper)
+// Client from comment
 async function writeClientFromComment(clientData, existingUsernames) {
     if (!clientData || !clientData.username) return;
 
-    const username = clientData.username.toLowerCase().replace('@', '');
+    const username = clientData.username.replace('@', '').toLowerCase();
     if (existingUsernames.has(username)) {
         console.log(`  [SKIP CLIENT] @${username} already saved`);
         return;
     }
 
-    const today = new Date().toISOString().split('T')[0];
-
     const row = [
         '',
-        clientData.profileUrl || `https://instagram.com/${username}/`,
-        `@${username}`,
-        clientData.via || 'comment',
-        clientData.source || '',
-        'client',
-        'Client',
         username,
-        clientData.location || '',
-        0, 0, 0, 'N/A',
-        '',
-        '',
-        '',
-        '',
-        (clientData.commentText || clientData.text || '').slice(0, 300),
-        today,
+        clientData.profileUrl || `https://instagram.com/${username}/`,
+        '',          // D: Whatsapp
+        '',          // E: Website
+        'Client',    // F: Category
+        0,           // G: Followers
+        0,           // H: Post
+        clientData.location || '',  // I: Location
+        '',          // J: Last Post
+        'N/A',       // K: Analytics
+        'Pending',   // L: Status
     ];
 
     const ok = await appendRow(row);
     if (ok) {
         existingUsernames.add(username);
-        console.log(`  [SAVED CLIENT] @${username} via ${clientData.via || 'comment'}`);
+        console.log(`  [SAVED CLIENT] @${username}`);
     }
 }
 
-// Write new hashtag (adds to first column as #hashtag, rows 2+)
+// Write new hashtag to column A (appends as new row)
 async function writeNewHashtag(hashtag) {
     if (!sheetsClient || !hashtag) return;
     const clean = hashtag.replace(/^#/, '').trim();
     if (!clean) return;
 
-    // Append as #hashtag in column A
-    const ok = await appendRow([[`#${clean}`]]);
+    // Append as #hashtag in columns A-L (fill rest with empty to match row width)
+    const emptyRow = Array(NUM_COLS).fill('');
+    emptyRow[0] = `#${clean}`;
+    const ok = await appendRow([emptyRow]);
     if (ok) console.log(`  [NEW HASHTAG] #${clean}`);
 }
 

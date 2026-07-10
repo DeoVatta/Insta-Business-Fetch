@@ -64,8 +64,10 @@ async function enrichProfile(username, postData = null) {
             const profilePostUrls = await scrapeProfilePosts(username, 12);
             console.log(`  [POSTS] Found ${profilePostUrls.length} posts on profile`);
             profile.profilePostUrls = profilePostUrls;
-            if (profilePostUrls.length > 0) {
-                const enrichedPosts = await enrichPostsBatch(profilePostUrls.slice(0, 6), 3, 2000);
+            // Last post = most recent = first URL (grid is newest-first)
+            profile.lastPostUrl = profilePostUrls[0] || '';
+            if (profilePostUrls.length > 1) {
+                const enrichedPosts = await enrichPostsBatch(profilePostUrls.slice(1, 7), 3, 2000);
                 for (const pd of enrichedPosts) {
                     pd.hashtags.forEach(h => profile.hashtags.add(h));
                     pd.mentions.forEach(m => profile.mentions.add(m));

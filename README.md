@@ -56,30 +56,23 @@ GOOGLE_SHEETS_ID=your_google_sheets_id_here
 
 The pipeline expects a Google Sheet with one tab: **Instagram**. All data (competitors, vendors, clients) goes into this single sheet — no sheet splitting. The pipeline auto-creates the "Instagram" sheet tab if it doesn't exist.
 
-**Sheet structure (column A → S):**
-| Col | Field |
-|-----|-------|
-| A | No |
-| B | Profile URL |
-| C | Username |
-| D | Via (hashtag / comment / discovery) |
-| E | Source Hashtag |
-| F | Type (competitor / vendor / client) |
-| G | Category |
-| H | Display Name |
-| I | Location |
-| J | Followers |
-| K | Following |
-| L | Posts |
-| M | Engagement % |
-| N | Bio |
-| O | Hashtags |
-| P | Mentions |
-| Q | Collabs |
-| R | Comment Text |
-| S | Date Scraped |
+**Sheet structure (column A → L):**
+| Col | Header | Description |
+|-----|--------|-------------|
+| A | No | ROW()-1 formula (auto) |
+| B | Nama | Instagram Display Name |
+| C | Instagram | Profile URL |
+| D | Whatsapp | WhatsApp number (auto-extracted from bio) |
+| E | Website | Website URL (auto-extracted from bio) |
+| F | Category | Business category (MUA, Photographer, Catering, Client, etc.) |
+| G | Followers | Follower count |
+| H | Post | Number of posts |
+| I | Location | Business location (city) |
+| J | Last Post | URL of most recent post |
+| K | Analytics | Engagement rate (likes+comments / followers) |
+| L | Status | Manual input by user |
 
-**Hashtag source:** Add hashtags directly in the sheet column A (as `#muasemarang`, `#riasjogja`, etc.). The pipeline reads them from there on startup.
+**Hashtag source:** Add hashtags in column A of the sheet (as `#muasemarang`, `#riasjogja`, etc.). Rows starting with `#` are read as hashtags.
 
 > **Note:** Copy your Google Sheets ID from the URL: `docs.google.com/spreadsheets/d/YOUR_SHEETS_ID_HERE/edit`
 
