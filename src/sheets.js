@@ -189,8 +189,10 @@ async function appendRow(sheetName, endCol, values) {
 }
 
 // Write a batch of AI-approved hashtags to Hashtags sheet
+// Discovered hashtags → Status: Pending (queued for next run)
 async function writeHashtagBatch(hashtags, existingHashtags) {
     // hashtags: [{ tag: '#muasemarang', found: 5 }, ...]
+    // Status: Pending = will be processed in next run
     let written = 0;
     for (const { tag, found } of hashtags) {
         const clean = tag.replace(/^#/, '').toLowerCase().trim();
