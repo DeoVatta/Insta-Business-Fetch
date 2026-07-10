@@ -1,27 +1,24 @@
 # Insta-Business-Fetch
 
-Automated Instagram business data extractor for Indonesian bridal/makeup market. Classifies profiles, discovers hashtags, and finds potential clients via comment analysis.
+Automated Instagram business data extractor for Indonesian bridal/makeup market. Runs 24/7 non-stop with nested depth-4 discovery, AI classification, and auto-resume on crash.
 
 ## Architecture
 
 ```
 index.js              — Main pipeline orchestrator
 src/
-  scraper.js          — Playwright + GraphQL + oEmbed (no external IG lib)
+  state.js           — Persistence + auto-resume (discovery-state.json)
+  scraper.js         — Playwright + GraphQL + oEmbed
   instagram-auth.js   — Auto cookie refresh via Playwright login
-  enricher.js         — Profile enrichment + classification
+  enricher.js         — Profile enrichment + 20 posts enrichment
   classifier.js       — Account type + location detection (Indonesian)
   comments.js         — GraphQL comment extraction + client scoring
-  ai-classifier.js    — AI batch classification via Olagon Gateway
+  ai-classifier.js   — AI batch classification via Olagon Gateway
   sheets.js           — Google Sheets read/write (append mode)
   config.js           — All constants
 ```
 
-**Confirmed working methods:**
-1. Playwright → `/explore/search/keyword/?q=%23{hashtag}` → post URLs
-2. oEmbed → public API → username + caption + hashtags (no auth, ~2000 posts/min)
-3. Playwright → `/{username}/` → profile data (bio, followers, following)
-4. GraphQL → `/graphql/query/` → post comments (with auto-retry on auth failure)
+**State file:** `discovery-state.json` — persists queue, visited profiles, hashtags, stats. Auto-resume on restart.
 
 ## Setup
 
@@ -50,12 +47,10 @@ OLAGON_BASE_URL=https://gateway.olagon.site
 
 ### 3. Google Sheets service account
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com) → IAM → Service Accounts
-2. Create a service account, download the JSON key
-3. Save it as `gcp-service-account.json`
-4. Share your Google Sheet with the service account email (`claude@cogent-range-458804-r9.iam.gserviceaccount.com`)
+1. Share your Google Sheet with: `claude@cogent-range-458804-r9.iam.gserviceaccount.com`
+2. Or create your own: Google Cloud Console → IAM → Service Accounts → download JSON → save as `gcp-service-account.json`
 
-The pipeline expects two tabs:
+**Sheet tabs:**
 
 **Sheet 1 — Instagram (A-L):**
 | Col | Header | Description |
@@ -81,93 +76,133 @@ The pipeline expects two tabs:
 | C | Found | Times this hashtag was found |
 | D | Status | Pending / Executing / Executed |
 
-> **Note:** Copy your Google Sheets ID from the URL: `docs.google.com/spreadsheets/d/YOUR_SHEETS_ID_HERE/edit`
-
-### 4. Run
+## Running
 
 ```bash
 node index.js
 ```
 
-The program processes **one hashtag per run**. Add hashtags to the Hashtags sheet with status `Pending`. Each run discovers new hashtags — they are queued automatically for future runs.
+The program runs **24/7 non-stop**. It processes hashtags sequentially, and resumes automatically from `discovery-state.json` on restart.
+
+**Add hashtags:** Put hashtags in the Hashtags sheet with status `Pending`. Program picks them up automatically.
 
 ## Pipeline Flow
 
 ```
-Sheet Hashtags → Pick first Pending → Process →
-  Collect profiles (batch 10) → AI classify → WRITE immediately
-  Collect hashtags → AI filter (business only) → Queue as Pending
-Mark Executed → Next Pending hashtag → repeat
+[START] Load discovery-state.json
+  └─ If exists → Resume from saved state
+  └─ If not → Fresh start
+
+[PER HASHTAG]
+  Phase 1: Scrape hashtag → get all post URLs
+  Phase 2: For each post:
+    - Enrich post (username, caption, hashtags, mentions, collabs)
+    - Collect hashtags → add to state
+    - Check Indonesian → skip if not
+    - Enrich profile → full nested enrichment (20 posts)
+      → collect more hashtags, mentions, collabs
+      → add to queue (depth+1)
+    - Extract comments → filter clients → write immediately
+    - Save state every 10 profiles
+  Phase 3: AI classify collected hashtags → write business ones to sheet
+  Phase 4: Process discovery queue (depth 2, 3, 4)
+    - Full nested enrichment for each queued profile
+    - Save state every 10 profiles
+  Mark hashtag Executed → next hashtag
+
+[REPEAT] Until all hashtags done → then wait or stop
 ```
 
-| Phase | Action |
-|-------|--------|
-| 1 | Scrape hashtag (Playwright scroll) |
-| 2 | Enrich posts + collect hashtags |
-| 3 | AI classify hashtags (business only) → write to Hashtags sheet |
-| 4 | Enrich profiles → buffer 10 → AI batch → WRITE immediately |
-| 5 | Comment extraction → client discovery |
-| 6 | Discovery queue (batch 10 → WRITE immediately) |
-| 7 | Re-login every 20 posts |
-
-## Queue System
-
-The program builds a self-growing hashtag queue:
+## Nested Depth Discovery
 
 ```
-#muasemarang | Pending  ← you add this
-    ↓ Run #1
-#muasemarang | Executed
-#wosemarang  | Pending  ← discovered by AI, queued for next run
-#bridaljogja | Pending  ← discovered by AI, queued
-    ↓ Run #2
-#wosemarang  | Executed
-#bridaljogja| Pending  ← you add this manually or let it grow
-#muasolo     | Pending  ← discovered, queued
-    ↓ ...
+Depth 1: Profiles from hashtag posts
+         └─ Enrich 20 recent posts → collect hashtags + mentions + collabs
+
+Depth 2: Profiles from depth 1 mentions/collabs
+         └─ Enrich 20 recent posts → collect hashtags + mentions + collabs
+
+Depth 3: Profiles from depth 2 mentions/collabs
+         └─ Enrich 20 recent posts → collect hashtags + mentions + collabs
+
+Depth 4: Profiles from depth 3 mentions/collabs
+         └─ Enrich 20 recent posts → collect hashtags + mentions + collabs
 ```
 
-- **Pending** = ready to be processed (user input OR AI discovery)
-- **Executing** = currently being processed
-- **Executed** = completed
+**Time per profile:** ~10.5 minutes (profile + 20 posts full enrichment)
 
-Loop continues until no more Pending hashtags remain.
+## Persistence & Auto-Resume
+
+**State file:** `discovery-state.json`
+
+```
+{
+  "version": 1,
+  "savedAt": "2026-07-10T...",
+  "currentHashtag": "#muasemarang",
+  "currentPhase": "profile-nested",
+  "queue": [...],
+  "visited": {...},
+  "hashtags": {...},
+  "stats": {...}
+}
+```
+
+**What is persisted:**
+- All visited profiles (never re-process)
+- Discovery queue with depth tracking
+- Collected hashtags with counts
+- Current phase and item
+- Stats (profiles, clients, batches)
+
+**Auto-resume behavior:**
+```
+$ node index.js
+[STATE] Resumed — 234 visited, 89 pending in queue
+[STATE] Current hashtag: #muasemarang (Executing)
+[STATE] Phase: profile-enrich | Item: {"username":"mua_jogja","depth":2}
+[RUN] Queue: 89 pending, Depth max: 4
+```
+
+**Save frequency:** Every 10 profiles + on batch complete + on abort/crash.
+
+**Crash recovery:** Max 10 profiles lost (last save interval).
 
 ## AI Classification
 
-**Claude Haiku** via Olagon Gateway. Key limits:
+**Claude Haiku** via Olagon Gateway (no thinking block):
 
 | Metric | Value |
 |--------|-------|
-| Max profiles per request | 150 (using 10 for visibility) |
-| Max hashtags per request | 200 |
-| Weekly quota | ~5 hours |
-| Profiles/week (batch 10) | ~3,000+ |
+| Batch size | 10 profiles |
+| AI batches per 5hrs | ~45 (safe limit) |
+| Profiles per 5hrs | ~450 |
+| Profiles/week | ~3,000+ |
 
-AI does:
-- **Profile**: Category, Location (city only), WhatsApp, Website, Engagement rate
-- **Hashtag**: Business-related or not? Only business hashtags are queued
+AI extracts: Category, Location (city), WhatsApp, Website, Engagement rate.
 
 ## Batch System
 
-Profile batch = **10 profiles**. Every 10 profiles enriched → AI batch → **written to sheet immediately**.
-
-```
-Enrich 10 profiles (~5 min) → AI batch (~20s) → 10 rows appear in sheet
-Enrich next 10 profiles → AI → 10 more rows
-...progress visible in real-time
-```
-
-Discovery queue: same pattern (batch 10, write immediately).
+Profiles are buffered and written to sheet every 10 profiles via AI batch classification. Comment extraction writes immediately per post.
 
 ## Key Features
 
-- **Queue system**: Self-growing hashtag discovery — each run expands the queue
-- **Immediate write**: Every batch → rows appear in sheet immediately (no waiting until end)
+- **24/7 non-stop**: Runs forever, resumes on restart
+- **Nested depth 4**: Full enrichment of 20 posts per profile at every depth level
+- **Persistence**: Auto-save to `discovery-state.json`, auto-resume on crash
+- **Immediate write**: Every batch written to sheet immediately — progress visible in real-time
 - **AI hashtag filter**: Only business-related hashtags enter the queue
-- **Indonesian-only**: Skips non-Indonesian accounts via city/word detection
-- **Auto-retry on GraphQL failure**: Stale sessionid triggers re-auth automatically
-- **Sessionid valid ~362 days**: No mid-run login needed
+- **Indonesian-only**: Skips non-Indonesian accounts
+- **Atomic saves**: Write to .tmp → rename to .json (no corruption on crash)
+
+## Clear State (Fresh Start)
+
+```bash
+# Delete state file
+rm discovery-state.json
+```
+
+Or add to config: `CLEAR_STATE=true node index.js`
 
 ## Troubleshooting
 
@@ -176,11 +211,15 @@ Discovery queue: same pattern (batch 10, write immediately).
 node -e "import('./src/instagram-auth.js').then(m => m.ensureAuth())"
 ```
 
-**Dry-run mode (no Sheets):**
-Pipeline runs in dry-run mode if `gcp-service-account.json` is missing — all writes printed to console.
+**Dry-run mode:** Pipeline runs dry-run if `gcp-service-account.json` is missing — all writes printed to console.
 
-**Quota monitoring:**
-Check `[AI]` log lines for batch counts. With batch 10, ~45 API calls per 5-hour run (well within 500 limit).
+**State file corrupt:**
+```
+[STATE] Corrupt state file — starting fresh
+```
+State resets automatically. Progress up to last save point is lost.
+
+**Quota monitoring:** Check `[AI]` log lines for batch counts.
 
 ## License
 

@@ -1,18 +1,21 @@
 /**
- * Instagram Prospector - Sequential Pipeline + AI Classification
+ * Instagram Prospector — Persistence + Nested Depth 4
  *
- * Two sheets:
- * - "Instagram" — profile data
- * - "Hashtags"  — hashtag tracking (only AI-approved business hashtags)
+ * Single script, 24/7 non-stop, auto-resume on crash.
  *
  * Flow:
- * PHASE 1  — Scrape hashtag
- * PHASE 2  — Enrich + collect hashtags
- * PHASE 3  — AI batch hashtag classify → write only business ones to Hashtags sheet
- * PHASE 4  — Enrich profiles → buffer 10 → AI batch → WRITE immediately
- * PHASE 5  — Comment extraction → client discovery
- * PHASE 6  — Discovery queue (AI batch every 10 profiles → WRITE immediately)
- * PHASE 7  — Every 20 posts: re-login
+ * 1. Load state → resume if exists
+ * 2. Pick pending hashtag
+ * 3. Scrape hashtag → get posts
+ * 4. Per post: enrich → collect hashtags/mentions/collabs
+ * 5. Per new profile:
+ *    a. Enrich profile
+ *    b. Enrich 20 recent posts (FULL enrichment)
+ *    c. Collect hashtags + mentions + collabs from 20 posts
+ *    d. Add new profiles to queue (depth+1)
+ * 6. Process discovery queue (depth 2, 3, 4)
+ * 7. Save state every 10 profiles
+ * 8. Repeat until queue empty → next hashtag
  */
 
 import {
@@ -28,304 +31,449 @@ import {
     writeProfile, writeClientFromComment,
 } from './src/sheets.js';
 import { isIndonesian } from './src/classifier.js';
-import { MAX_COLLAB_DEPTH, MAX_API_ERRORS_CONSECUTIVE, PHASE2_TIMEOUT_MIN, REQUEST_DELAY } from './src/config.js';
+import { MAX_API_ERRORS_CONSECUTIVE, REQUEST_DELAY } from './src/config.js';
+import {
+    loadState, forceSave, checkpoint,
+    getState, setCurrentHashtag, setPhase,
+    addToQueue, getNextInQueue, markQueueDone,
+    isVisited, markVisited, markEnriched, getQueueStats,
+    addHashtag, getHashtags,
+    incStats, bufferProfile, getProfileBuffer, clearProfileBuffer,
+    printStats,
+} from './src/state.js';
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+const MAX_DEPTH = 4;
 const PROFILE_BATCH_SIZE = 10;
-const DISCOVERY_BATCH_SIZE = 10;
+const POSTS_PER_PROFILE = 20;
+const SAVE_EVERY = 10;
 
-let _currentHashtag = null;
+let postCount = 0;
+let globalErrorCount = 0;
+let sessionProfileCount = 0;
 
 async function run() {
     console.log('='.repeat(60));
-    console.log('INSTAGRAM PROSPECTOR — Pipeline + AI (batch 10)');
+    console.log('INSTAGRAM PROSPECTOR — Persistence + Nested Depth 4');
     console.log('='.repeat(60));
 
     // INIT
-    console.log('\n[INIT] Starting...\n');
     await initSheets();
     await initBrowser();
     await refreshCookieStr();
 
+    // LOAD OR CREATE STATE
+    const state = await loadState();
+    const existingUsernames = new Set(Object.keys(state.visited));
+    const existingHashtags = new Set(
+        Object.keys(state.hashtags)
+    );
+
+    // Get pending hashtags from sheet
     const pendingHashtags = await readHashtags();
     if (pendingHashtags.length === 0) {
         console.log('[ERROR] No pending hashtags in Hashtags sheet. Add hashtags with status=Pending.');
         process.exit(1);
     }
 
-    const visited = await readVisitedProfiles();
-    const hashtagsInSheet = await readHashtagsInSheet();
+    // Check which hashtags are already done in state
+    const doneInState = new Set(
+        Object.entries(state.hashtags)
+            .filter(([, v]) => v.status === 'Executed')
+            .map(([k]) => k)
+    );
+    const availableHashtags = pendingHashtags.filter(h => {
+        const clean = h.replace(/^#/, '').toLowerCase().trim();
+        return !doneInState.has(clean);
+    });
 
-    let stats = { profiles: 0, clients: 0, errors: 0, aiProfiles: 0, hashtagsWritten: 0, batches: 0 };
-    let globalErrorCount = 0;
-    let phase2Start = Date.now();
-    let postCount = 0;
-
-    const hashtag = pendingHashtags[0];
-    _currentHashtag = hashtag;
-
-    console.log('-'.repeat(60));
-    console.log(`[RUN] Hashtag: ${hashtag} | Batch size: ${PROFILE_BATCH_SIZE}`);
-    console.log('-'.repeat(60));
-
-    await markHashtagStatus(hashtag, 'Executing');
-    await refreshCookieStr();
-
-    // PHASE 1 — Scrape
-    console.log('\n[PHASE 1] Scraping hashtag...\n');
-    const posts = await scrapeHashtag(hashtag);
-    console.log(`\n  → Found ${posts.length} posts\n`);
-
-    if (posts.length === 0) {
-        await markHashtagStatus(hashtag, 'Executed');
-        await closeBrowser();
-        printSummary(stats, hashtag);
-        return;
+    if (availableHashtags.length === 0) {
+        console.log('[INFO] All hashtags in sheet already Executed in state. Starting fresh scan.');
+        await clearState();
+        availableHashtags.push(...pendingHashtags);
     }
 
-    // PHASE 2 — Enrich + collect hashtags
-    console.log('-'.repeat(60));
-    console.log('[PHASE 2] Enriching profiles + collecting hashtags...');
-    console.log('-'.repeat(60) + '\n');
+    console.log(`[RUN] ${availableHashtags.length} available hashtags to process`);
+    console.log(`[RUN] Queue: ${getQueueStats().pending} pending, Depth max: ${MAX_DEPTH}`);
 
-    const profileBuffer = [];
-    const discoveryQueue = [];
-    const seenInQueue = new Set();
-    const allHashtags = new Set();
-    const hashtagCounts = {};
+    // MAIN LOOP: Process hashtags until all done
+    let hashtagIdx = 0;
+    while (hashtagIdx < availableHashtags.length) {
+        const hashtag = availableHashtags[hashtagIdx];
+        setCurrentHashtag(hashtag, 'Executing');
+        await markHashtagStatus(hashtag, 'Executing');
+        await refreshCookieStr();
+        await checkpoint(`Start hashtag ${hashtag}`);
 
-    for (let i = 0; i < posts.length; i++) {
-        const post = posts[i];
+        console.log('\n' + '='.repeat(60));
+        console.log(`[HASHTAG ${hashtagIdx + 1}/${availableHashtags.length}] ${hashtag}`);
+        console.log('='.repeat(60));
 
-        if (postCount > 0 && postCount % 20 === 0) {
-            console.log(`\n[PHASE 7] Re-login (count=${postCount})...`);
-            await refreshCookieStr();
-        }
-        postCount++;
+        // PHASE 1: Scrape hashtag
+        console.log('\n[PHASE 1] Scraping hashtag...');
+        setPhase('hashtag-scrape');
+        const posts = await scrapeHashtag(hashtag);
+        console.log(`  → ${posts.length} posts found`);
 
-        const elapsedMin = (Date.now() - phase2Start) / 60000;
-        if (elapsedMin >= (PHASE2_TIMEOUT_MIN || 60)) {
-            console.log(`\n[STOP] ${elapsedMin.toFixed(1)} min timeout.`); break;
-        }
-
-        const postNum = i + 1;
-        const shortcode = post.shortcode || '';
-        const postUrl = `https://www.instagram.com/p/${shortcode}/`;
-        console.log(`\n[POST ${postNum}/${posts.length}] ${shortcode}`);
-
-        const postData = await enrichPost(postUrl);
-        if (!postData || !postData.username) { globalErrorCount++; continue; }
-
-        const username = postData.username.toLowerCase();
-        if (username === 'deovatta' || !username) { console.log(`  [SKIP] Own account`); continue; }
-
-        const isNewProfile = !visited.has(username);
-
-        // Collect hashtags
-        for (const tag of (postData.hashtags || [])) {
-            const clean = tag.replace(/^#/, '').toLowerCase().trim();
-            if (!clean) continue;
-            allHashtags.add('#' + clean);
-            hashtagCounts[clean] = (hashtagCounts[clean] || 0) + 1;
+        if (posts.length === 0) {
+            await markHashtagStatus(hashtag, 'Executed');
+            hashtagIdx++;
+            continue;
         }
 
-        const postText = ((postData.caption || '') + ' ' + (postData.hashtags || []).join(' ')).toLowerCase();
-        if (!isIndonesian(postText, [], '')) { console.log(`  [SKIP] @${username} — not Indonesian`); continue; }
-
-        const profile = await enrichProfile(username, postData);
-        if (!profile) { globalErrorCount++; continue; }
+        // PHASE 2: Process hashtag posts → collect profiles
+        console.log('\n[PHASE 2] Processing hashtag posts...');
+        setPhase('post-enrich');
+        postCount = 0;
         globalErrorCount = 0;
 
-        if (!isIndonesian(profile.bio || '', [...(profile.hashtags || [])], profile.nativeLocation || '')) {
-            console.log(`  [SKIP] @${username} — profile not Indonesian`); continue;
-        }
+        for (let i = 0; i < posts.length; i++) {
+            const post = posts[i];
 
-        profile.sourceHashtag = hashtag;
-        profile.via = 'hashtag';
+            if (postCount > 0 && postCount % 20 === 0) {
+                console.log(`\n[REAUTH] Refreshing cookies (post ${postCount})...`);
+                await refreshCookieStr();
+            }
 
-        if (isNewProfile) {
-            profileBuffer.push(profile);
-            visited.add(username);
-            stats.profiles++;
+            const postNum = i + 1;
+            const shortcode = post.shortcode || '';
+            const postUrl = `https://www.instagram.com/p/${shortcode}/`;
+            console.log(`\n[POST ${postNum}/${posts.length}] ${shortcode}`);
 
-            // Buffer full → AI batch → WRITE immediately
-            if (profileBuffer.length >= PROFILE_BATCH_SIZE) {
-                stats.batches++;
-                console.log(`\n[PHASE 4] AI batch ${stats.batches} — processing ${profileBuffer.length} profiles...`);
+            setPhase('post-enrich', { shortcode, index: i });
 
-                const aiProfiles = await classifyProfilesBatch(profileBuffer);
+            const postData = await enrichPost(postUrl);
+            if (!postData || !postData.username) { globalErrorCount++; continue; }
 
-                for (const p of aiProfiles) {
-                    await writeProfile(p, visited);
-                    stats.aiProfiles++;
+            const username = postData.username.toLowerCase();
+            if (username === 'deovatta' || !username) continue;
+
+            // Collect hashtags from post
+            for (const tag of (postData.hashtags || [])) {
+                const clean = tag.replace(/^#/, '').toLowerCase().trim();
+                if (!clean) continue;
+                addHashtag('#' + clean, `post:${shortcode}`);
+            }
+
+            // Indonesian check via caption
+            const postText = ((postData.caption || '') + ' ' + (postData.hashtags || []).join(' ')).toLowerCase();
+            if (!isIndonesian(postText, [], '')) {
+                console.log(`  [SKIP] @${username} — not Indonesian`); continue;
+            }
+
+            // Enrich profile
+            const profile = await enrichProfile(username, postData);
+            if (!profile) { globalErrorCount++; continue; }
+            globalErrorCount = 0;
+
+            // Profile Indonesian check
+            if (!isIndonesian(profile.bio || '', [...(profile.hashtags || [])], profile.nativeLocation || '')) {
+                console.log(`  [SKIP] @${username} — profile not Indonesian`); continue;
+            }
+
+            // Mark as visited (depth 1)
+            const visitedInfo = markVisited(username, 1);
+            if (visitedInfo.depth === 1 && !visitedInfo.enriched) {
+                // First time seeing this profile → full nested enrichment
+                await enrichAndNestedDiscover(username, profile, 1, shortcode, existingUsernames);
+            }
+
+            // Collect mentions + collabs from caption → add to queue (depth 2)
+            for (const m of [...(postData.mentions || []), ...(postData.collabs || [])]) {
+                const mLower = m.toLowerCase();
+                addToQueue(mLower, 2, username);
+            }
+
+            // PHASE 5: Comment extraction for last 10 posts
+            const allComments = await fetchAllPostCommentsGraphQL(shortcode, 100);
+            if (allComments?.length) {
+                const clients = filterClients(allComments, username);
+                for (const client of clients) {
+                    const cUser = client.username.toLowerCase();
+                    if (isVisited(cUser)) continue;
+                    const clientData = {
+                        username: cUser,
+                        via: 'comment',
+                        source: hashtag,
+                        commentText: (client.text || '').slice(0, 200),
+                        location: '',
+                        profileUrl: `https://instagram.com/${cUser}/`,
+                    };
+                    await writeClientFromComment(clientData, existingUsernames);
+                    incStats('clients');
+                    markVisited(cUser, 0);
                 }
+            }
 
-                console.log(`  → ${aiProfiles.length} profiles written to sheet`);
-                profileBuffer.length = 0;
+            postCount++;
+            await sleep(REQUEST_DELAY * 1000);
+        }
+
+        await checkpoint(`Hashtag ${hashtag} posts done`);
+        await markHashtagStatus(hashtag, 'Executed');
+
+        // PHASE 3: AI classify all collected hashtags → write business ones to sheet
+        console.log('\n[PHASE 3] AI hashtag classification...');
+        const allHT = getHashtags();
+        if (allHT.length > 0) {
+            const tagsToClassify = allHT.filter(h => h.status === 'Pending').map(h => h.tag);
+            if (tagsToClassify.length > 0) {
+                const aiHashtags = await classifyHashtagsBatch(tagsToClassify);
+                if (aiHashtags.length > 0) {
+                    const withCounts = aiHashtags.map(h => ({
+                        tag: h.tag,
+                        found: state.hashtags[h.tag.replace('#', '')]?.found || 1,
+                    }));
+                    const written = await writeHashtagBatch(withCounts, existingHashtags);
+                    incStats('hashtagsWritten', written);
+                }
             }
         }
 
-        // Discovery
-        for (const m of [...(postData.mentions || []), ...(postData.collabs || [])]) {
-            const mLower = m.toLowerCase();
-            if (!visited.has(mLower) && !seenInQueue.has(mLower)) {
-                seenInQueue.add(mLower);
-                discoveryQueue.push({ username: mLower, depth: 1, source: username });
+        hashtagIdx++;
+        await forceSave();
+    }
+
+    // PHASE 4: Process discovery queue (depth 2, 3, 4)
+    console.log('\n' + '='.repeat(60));
+    console.log('[PHASE 4] Discovery queue — nested depth 2-4...');
+    console.log('='.repeat(60));
+
+    await processDiscoveryQueue(existingUsernames);
+
+    // DONE
+    await forceSave();
+    await checkpoint('All hashtags complete');
+    printStats();
+    await closeBrowser();
+
+    console.log('\n' + '='.repeat(60));
+    console.log('[DONE] All hashtags processed. Discovery queue may still have pending items.');
+    console.log('       Run again to continue processing queue.');
+    console.log('='.repeat(60));
+}
+
+/**
+ * Full nested enrichment: enrich 20 recent posts per profile
+ * Extract hashtags, mentions, collabs → add to queue
+ */
+async function enrichAndNestedDiscover(username, profile, depth, sourcePost, existingUsernames) {
+    console.log(`\n[NESTED D${depth}] @${username} — enriching ${POSTS_PER_PROFILE} posts...`);
+    setPhase('profile-nested', { username, depth });
+
+    const profilePostUrls = profile.profilePostUrls || [];
+    const postsToEnrich = profilePostUrls.slice(0, POSTS_PER_PROFILE);
+
+    let discErrors = 0;
+
+    for (let pi = 0; pi < postsToEnrich.length; pi++) {
+        const postUrl = postsToEnrich[pi];
+        const shortcode = postUrl.split('/p/')[1]?.replace('/', '') || '';
+
+        console.log(`  [POST ${pi + 1}/${postsToEnrich.length}] ${shortcode}`);
+
+        try {
+            const postData = await enrichPost(postUrl);
+            if (!postData) { discErrors++; continue; }
+            discErrors = 0;
+
+            // Collect hashtags
+            for (const tag of (postData.hashtags || [])) {
+                const clean = tag.replace(/^#/, '').toLowerCase().trim();
+                if (!clean) continue;
+                addHashtag('#' + clean, `${username}:post:${shortcode}`);
             }
+
+            // Collect mentions + collabs → add to queue (depth+1)
+            const allMentions = [...(postData.mentions || []), ...(postData.collabs || [])];
+            for (const m of allMentions) {
+                const mLower = m.toLowerCase();
+                addToQueue(mLower, depth + 1, username);
+            }
+
+            // Comment extraction (only for depth 1, skip for depth 2+ to save time)
+            if (depth === 1) {
+                const allComments = await fetchAllPostCommentsGraphQL(shortcode, 100);
+                if (allComments?.length) {
+                    const clients = filterClients(allComments, username);
+                    for (const client of clients) {
+                        const cUser = client.username.toLowerCase();
+                        if (isVisited(cUser)) continue;
+                        const clientData = {
+                            username: cUser,
+                            via: 'comment',
+                            source: `${username}:${shortcode}`,
+                            commentText: (client.text || '').slice(0, 200),
+                            location: '',
+                            profileUrl: `https://instagram.com/${cUser}/`,
+                        };
+                        await writeClientFromComment(clientData, existingUsernames);
+                        incStats('clients');
+                        markVisited(cUser, 0);
+                    }
+                }
+            }
+
+            await sleep(REQUEST_DELAY * 1000);
+        } catch (e) {
+            discErrors++;
+            console.log(`  [ERROR] Post ${shortcode}: ${e.message}`);
         }
+    }
+
+    // Mark profile as enriched
+    markEnriched(username);
+
+    // Add profile to batch for AI write
+    profile.sourceHashtag = `nested d${depth} via @${sourcePost}`;
+    profile.via = 'discovery';
+    bufferProfile(profile);
+    existingUsernames.add(username.toLowerCase());
+
+    sessionProfileCount++;
+    incStats('profiles');
+
+    if (sessionProfileCount % SAVE_EVERY === 0) {
+        await flushProfileBuffer(existingUsernames);
+        await checkpoint(`Saved after ${sessionProfileCount} profiles`);
+        printStats();
+    }
+}
+
+/**
+ * Process discovery queue — depth 2, 3, 4
+ */
+async function processDiscoveryQueue(existingUsernames) {
+    let discCount = 0;
+    let consecutiveSeen = 0;
+
+    while (true) {
+        const item = getNextInQueue(MAX_DEPTH);
+        if (!item) {
+            console.log('\n[QUEUE] Empty — discovery complete for this hashtag');
+            break;
+        }
+
+        const { username, depth, source } = item;
+        console.log(`\n[QUEUE ${++discCount}] @${username} (depth=${depth}, via=@${source})`);
+
+        if (discCount > 0 && discCount % 20 === 0) {
+            console.log(`\n[REAUTH] Refreshing cookies...`);
+            await refreshCookieStr();
+        }
+
+        // Skip if somehow already visited
+        if (isVisited(username)) {
+            consecutiveSeen++;
+            if (consecutiveSeen >= 10) {
+                console.log(`\n[QUEUE] 10 consecutive seen — stopping`);
+                break;
+            }
+            continue;
+        }
+        consecutiveSeen = 0;
+
+        markVisited(username, depth);
+        existingUsernames.add(username.toLowerCase());
+
+        // Enrich profile
+        setPhase('profile-enrich', { username, depth });
+        const profile = await enrichProfile(username);
+        if (!profile) {
+            markQueueDone(username);
+            continue;
+        }
+
+        // Indonesian check
+        if (!isIndonesian(profile.bio || '', [...(profile.hashtags || [])], profile.nativeLocation || '')) {
+            console.log(`  [SKIP] @${username} — not Indonesian`);
+            markQueueDone(username);
+            continue;
+        }
+
+        // Full nested enrichment: 20 posts per profile
+        await enrichAndNestedDiscover(username, profile, depth, source, existingUsernames);
+
+        markQueueDone(username);
     }
 
     // Flush remaining buffer
-    if (profileBuffer.length > 0) {
-        stats.batches++;
-        console.log(`\n[PHASE 4] Flushing buffer — ${profileBuffer.length} profiles...`);
-        const aiProfiles = await classifyProfilesBatch(profileBuffer);
+    await flushProfileBuffer(existingUsernames);
+}
+
+/**
+ * Flush profile buffer: AI batch → write to sheet
+ */
+async function flushProfileBuffer(existingUsernames) {
+    const buf = getProfileBuffer();
+    if (!buf || buf.length === 0) return;
+
+    console.log(`\n[FLUSH] Processing ${buf.length} buffered profiles...`);
+
+    // Dedupe buffer
+    const seen = new Set();
+    const unique = buf.filter(p => {
+        const key = (p.username || '').toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+
+    if (unique.length === 0) {
+        clearProfileBuffer();
+        return;
+    }
+
+    // AI batch classify
+    incStats('batches');
+    try {
+        const aiProfiles = await classifyProfilesBatch(unique);
+        incStats('aiProfiles', aiProfiles.length);
+
         for (const p of aiProfiles) {
-            await writeProfile(p, visited);
-            stats.aiProfiles++;
-        }
-        console.log(`  → ${aiProfiles.length} profiles written`);
-        profileBuffer.length = 0;
-    }
-
-    // PHASE 3 — AI classify hashtags → write business ones
-    console.log('\n' + '-'.repeat(60));
-    console.log(`[PHASE 3] AI hashtag classification — ${allHashtags.size} unique hashtags...`);
-    console.log('-'.repeat(60) + '\n');
-
-    const hashtagArray = [...allHashtags].map(t => ({ tag: t, found: hashtagCounts[t.replace('#', '')] || 1 }));
-    const aiHashtags = await classifyHashtagsBatch(hashtagArray.map(h => h.tag));
-
-    if (aiHashtags.length > 0) {
-        const withCounts = aiHashtags.map(h => ({
-            tag: h.tag,
-            found: hashtagCounts[h.tag.replace('#', '')] || 1,
-        }));
-        const written = await writeHashtagBatch(withCounts, hashtagsInSheet);
-        stats.hashtagsWritten = written;
-    } else {
-        console.log('[PHASE 3] No business-related hashtags found');
-    }
-
-    // PHASE 5 — Comment extraction
-    console.log('\n' + '-'.repeat(60));
-    console.log(`[PHASE 5] Comment extraction (${posts.slice(-10).length} posts)...`);
-    console.log('-'.repeat(60) + '\n');
-
-    for (const post of posts.slice(-10)) {
-        const shortcode = post.shortcode || '';
-        console.log(`\n[COMMENT] ${shortcode}`);
-
-        const postAuthor = (post.username || '').toLowerCase();
-        const allComments = await fetchAllPostCommentsGraphQL(shortcode, 100);
-        if (!allComments?.length) { console.log(`  → 0 comments`); continue; }
-        console.log(`  → ${allComments.length} comments`);
-
-        const clients = filterClients(allComments, postAuthor || null);
-        for (const client of clients) {
-            const cUser = client.username.toLowerCase();
-            if (visited.has(cUser)) continue;
-            const clientData = {
-                username: cUser,
-                via: 'comment',
-                source: hashtag,
-                commentText: (client.text || '').slice(0, 200),
-                location: '',
-                profileUrl: `https://instagram.com/${cUser}/`,
-            };
-            await writeClientFromComment(clientData, visited);
-            stats.clients++;
+            await writeProfile(p, existingUsernames);
         }
 
-        await sleep(REQUEST_DELAY * 1000);
-    }
-
-    // PHASE 6 — Discovery queue (AI batch every 10 → WRITE immediately)
-    console.log('\n' + '-'.repeat(60));
-    console.log(`[PHASE 6] Discovery queue (${discoveryQueue.length} profiles)...`);
-    console.log('-'.repeat(60) + '\n');
-
-    let discCount = 0, discErrors = 0, consecutiveSeen = 0, discPostCount = 0;
-    const discBuffer = [];
-
-    while (discoveryQueue.length > 0) {
-        const item = discoveryQueue.shift();
-        if (visited.has(item.username)) { consecutiveSeen++; if (consecutiveSeen >= 10) break; continue; }
-        if (item.depth > (MAX_COLLAB_DEPTH || 2)) continue;
-
-        visited.add(item.username);
-        discCount++;
-
-        if (discPostCount > 0 && discPostCount % 20 === 0) {
-            console.log(`\n[PHASE 7] Re-login (discovery=${discCount})...`);
-            await refreshCookieStr();
-        }
-        discPostCount++;
-
-        console.log(`\n[DISCOVER ${discCount}] @${item.username} (via @${item.source}, depth=${item.depth})`);
-
-        const profile = await enrichProfile(item.username);
-        if (!profile) { discErrors++; continue; }
-        discErrors = 0;
-
-        if (!isIndonesian(profile.bio || '', [...(profile.hashtags || [])], profile.nativeLocation || '')) continue;
-
-        profile.sourceHashtag = `collab via @${item.source}`;
-        profile.via = 'discovery';
-
-        discBuffer.push(profile);
-
-        // Buffer full → AI batch → WRITE immediately
-        if (discBuffer.length >= DISCOVERY_BATCH_SIZE) {
-            console.log(`\n[PHASE 6] Discovery batch — AI + write ${discBuffer.length} profiles...`);
-            const aiResults = await classifyProfilesBatch(discBuffer);
-            for (const p of aiResults) {
-                await writeProfile(p, visited);
-                stats.aiProfiles++;
-            }
-            discBuffer.length = 0;
+        console.log(`  → ${aiProfiles.length} profiles written to sheet`);
+    } catch (e) {
+        console.warn(`[FLUSH] AI batch failed: ${e.message} — using fallback`);
+        for (const p of unique) {
+            await writeProfile(p, existingUsernames);
         }
     }
 
-    // Flush remaining discovery
-    if (discBuffer.length > 0) {
-        console.log(`\n[PHASE 6] Flushing discovery buffer — ${discBuffer.length} profiles...`);
-        const aiResults = await classifyProfilesBatch(discBuffer);
-        for (const p of aiResults) {
-            await writeProfile(p, visited);
-            stats.aiProfiles++;
-        }
-    }
-
-    await markHashtagStatus(hashtag, 'Executed');
-    await closeBrowser();
-    printSummary(stats, hashtag);
+    clearProfileBuffer();
+    await forceSave();
 }
 
-function printSummary(stats, hashtag) {
-    console.log('\n' + '='.repeat(60));
-    console.log('[DONE] SCAN COMPLETE');
-    console.log('='.repeat(60));
-    console.log(`  Hashtag:      ${hashtag}`);
-    console.log(`  Profiles:     ${stats.profiles}`);
-    console.log(`  AI Batches:   ${stats.batches}`);
-    console.log(`  AI Processed: ${stats.aiProfiles}`);
-    console.log(`  Hashtags:     ${stats.hashtagsWritten} written to Hashtags sheet`);
-    console.log(`  Clients:      ${stats.clients}`);
-    console.log('='.repeat(60));
-}
-
+// ===== SIGNALS =====
 process.on('SIGINT', async () => {
-    console.log('\n[ABORT] Closing...');
-    if (_currentHashtag) await markHashtagStatus(_currentHashtag, 'Failed').catch(() => {});
+    console.log('\n[ABORT] Saving state before exit...');
+    await flushProfileBuffer(new Set());
+    await forceSave();
+    printStats();
     await closeBrowser().catch(() => {});
     process.exit(1);
 });
 
+process.on('uncaughtException', async (e) => {
+    console.error('[CRASH]', e.message);
+    await flushProfileBuffer(new Set()).catch(() => {});
+    await forceSave();
+    await closeBrowser().catch(() => {});
+    process.exit(1);
+});
+
+process.on('unhandledRejection', async (e) => {
+    console.error('[REJECT]', e);
+    await forceSave();
+});
+
+// ===== START =====
 run().catch(async (e) => {
     console.error('[FATAL]', e.message);
-    if (_currentHashtag) await markHashtagStatus(_currentHashtag, 'Failed').catch(() => {});
+    await forceSave().catch(() => {});
     await closeBrowser().catch(() => {});
     process.exit(1);
 });
