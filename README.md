@@ -54,11 +54,32 @@ GOOGLE_SHEETS_ID=your_google_sheets_id_here
 3. Save it as `gcp-service-account.json` in the project root
 4. Share your Google Sheet (using the ID from `GOOGLE_SHEETS_ID`) with the service account email (`...@....iam.gserviceaccount.com`)
 
-The pipeline expects a Google Sheet with these tabs:
-- **Competitors** — MUA/profiles from hashtags
-- **Vendor** — Wedding vendors (fotografer, catering, etc.)
-- **Client** — Potential clients found via comment analysis
-- **VendorHashtags** — Hashtags to scan (add hashtags in column B with status `OK` or `NEW`)
+The pipeline expects a Google Sheet with one tab: **Instagram**. All data (competitors, vendors, clients) goes into this single sheet — no sheet splitting. The pipeline auto-creates the "Instagram" sheet tab if it doesn't exist.
+
+**Sheet structure (column A → S):**
+| Col | Field |
+|-----|-------|
+| A | No |
+| B | Profile URL |
+| C | Username |
+| D | Via (hashtag / comment / discovery) |
+| E | Source Hashtag |
+| F | Type (competitor / vendor / client) |
+| G | Category |
+| H | Display Name |
+| I | Location |
+| J | Followers |
+| K | Following |
+| L | Posts |
+| M | Engagement % |
+| N | Bio |
+| O | Hashtags |
+| P | Mentions |
+| Q | Collabs |
+| R | Comment Text |
+| S | Date Scraped |
+
+**Hashtag source:** Add hashtags directly in the sheet column A (as `#muasemarang`, `#riasjogja`, etc.). The pipeline reads them from there on startup.
 
 > **Note:** Copy your Google Sheets ID from the URL: `docs.google.com/spreadsheets/d/YOUR_SHEETS_ID_HERE/edit`
 
