@@ -784,32 +784,41 @@ async function scrapeHashtag(hashtag, maxPosts = 200) {
 
     console.log(`[HASHTAG] #${hashtag}`);
     const cleanTag = hashtag.replace(/^#/, '');
-    // Use hashtag page — higher post yield than keyword search
     const searchUrl = `https://www.instagram.com/explore/tags/${encodeURIComponent(cleanTag)}/`;
 
     await _page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 40000 });
 
-    // Wait for React to render initial posts
+    // Wait for posts to render — use img inside post links (more reliable than article selector)
     try {
-        await _page.waitForSelector('a[href*="/p/"]', { timeout: 20000 });
+        await _page.waitForSelector('a[href*="/p/"] img', { timeout: 20000 });
     } catch (e) {
-        console.log(`  [WARN] No posts appeared — page may be blocked`);
+        console.log(`  [WARN] No posts appeared — page may be blocked or slow to load`);
     }
-    await _page.waitForTimeout(2000);
+    await _page.waitForTimeout(3000);
 
-    // Scroll to load more posts (lazy loading — Instagram loads ~12 posts per scroll)
+    // Scroll to load more posts
     let prevCount = 0;
-    let consecutiveEmpty = 0; // scrolls in a row with no new posts
+    let consecutiveEmpty = 0;
     let scrollCount = 0;
+    let selector = 'article a[href*="/p/"]'; // try article-first
     const maxScrolls = MAX_SCROLL_HASHTAG || 50;
 
     while (scrollCount < maxScrolls) {
-        // Use article divs (more reliable on hashtag page)
-        const urls = await _page.$$eval('article a[href*="/p/"]',
+        // Try article selector first, fall back to broader selector
+        let urls = await _page.$$eval(selector,
             els => [...new Set(els.map(e => e.href.split('?')[0]))]);
+
+        // Fallback: if article selector finds nothing, use broader selector
+        if (urls.length === 0) {
+            urls = await _page.evaluate(() => {
+                const links = Array.from(document.querySelectorAll('a[href*="/p/"]'));
+                return [...new Set(links.map(l => l.href.split('?')[0]))];
+            });
+        }
+
         const currentCount = urls.length;
 
-        // Stop only after 8 consecutive scrolls with no new posts (truly exhausted)
+        // Stop after 8 consecutive scrolls with no new posts (truly exhausted)
         if (currentCount > 0 && currentCount === prevCount) {
             consecutiveEmpty++;
             if (consecutiveEmpty >= 8) {
@@ -817,25 +826,37 @@ async function scrapeHashtag(hashtag, maxPosts = 200) {
                 break;
             }
         } else {
-            consecutiveEmpty = 0; // reset when new posts appear
+            consecutiveEmpty = 0;
         }
 
-        // Also stop if stuck at 0 posts for too long
-        if (currentCount === 0 && scrollCount > 5) {
+        // Stop if stuck at 0 posts for too long
+        if (currentCount === 0 && scrollCount > 10) {
             console.log(`  [SCROLL] 0 posts after ${scrollCount} scrolls — stopping`);
             break;
         }
 
         prevCount = currentCount;
-        // Scroll by 2x viewport height — smoother and faster
-        await _page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
-        await _page.waitForTimeout(1500);
+        // Scroll to bottom — triggers lazy loading on hashtag page
+        await _page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await _page.waitForTimeout(2000);
+
+        // Wait for new images to load after scroll
+        try {
+            await _page.waitForSelector('a[href*="/p/"] img', { timeout: 8000 });
+        } catch (_) { /* no new images, continue scrolling */ }
+
         scrollCount++;
     }
 
-    // Extract post URLs
-    const postUrls = await _page.$$eval('article a[href*="/p/"]',
+    // Extract final post URLs — try article first, then broader
+    let postUrls = await _page.$$eval('article a[href*="/p/"]',
         els => [...new Set(els.map(e => e.href.split('?')[0]))]);
+    if (postUrls.length === 0) {
+        postUrls = await _page.evaluate(() => {
+            const links = Array.from(document.querySelectorAll('a[href*="/p/"]'));
+            return [...new Set(links.map(l => l.href.split('?')[0]))];
+        });
+    }
 
     console.log(`  Found ${postUrls.length} post URLs (${scrollCount} scrolls)`);
     if (postUrls.length === 0) return [];
@@ -853,7 +874,11 @@ async function scrapeHashtag(hashtag, maxPosts = 200) {
     // Fallback: extract from img[alt] (hashtags/mentions, no username)
     const postsData = await _page.evaluate(() => {
         const results = [];
-        const postLinks = Array.from(document.querySelectorAll('a[href*="/p/"]'));
+        // Try article first, fall back to all post links
+        let postLinks = Array.from(document.querySelectorAll('article a[href*="/p/"]'));
+        if (postLinks.length === 0) {
+            postLinks = Array.from(document.querySelectorAll('a[href*="/p/"]'));
+        }
         const seenCodes = new Set();
 
         for (const link of postLinks) {
