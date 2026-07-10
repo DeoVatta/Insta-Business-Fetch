@@ -1,21 +1,33 @@
 /**
  * Instagram Prospector - Comment Extraction + Client Discovery
+ *
+ * Comment data via GraphQL (confirmed working 2026-07):
+ * GET https://www.instagram.com/graphql/query/?query_hash=bc3296d1ce80a24b1b6e40b1e72903f5
+ *
+ * Client discovery strategy:
+ * 1. For each post → fetch ALL comments via GraphQL
+ * 2. Filter non-MUA commenters (exclude post author + other MUA accounts)
+ * 3. Score by engagement quality
+ * 4. Top scorers → saved to Client sheet
  */
 
-import { fetchAllPostCommentsGraphQL } from './scraper.js';
+import { fetchAllPostCommentsGraphQL, enrichPost } from './scraper.js';
 import { REQUEST_DELAY } from './config.js';
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+}
 
+// ============== CLIENT SCORING ==============
 const CLIENT_KEYWORDS = [
     'booking', 'book', 'pemesanan', 'reservasi', 'appointment',
     'harga', 'price', 'tarif', 'berapa', 'cost',
     'available', 'tersedia', 'jadwal', 'schedule',
-    'konsultasi', 'consultation', 'tanya',
+    'konsultasi', 'consultation', 'tanya', 'tanya-tanya',
     ' DM ', ' dm ', ' dm!', ' dm?', ' DM!', ' DM?',
     ' WA ', ' wa ', ' whatsapp ', ' WhatsApp ',
     '0812', '0813', '628', '+62',
-    'bridal', 'prewedding', 'engagement', 'resepsi',
+    'bridal', 'prewedding', 'engagement', 'engangement', 'resepsi',
     'pengantin', 'bride', 'groom', 'rias pengantin',
 ];
 
@@ -39,15 +51,22 @@ const SUSPICIOUS_KEYWORDS = [
     'follow', 'follower', 'followers',
 ];
 
+// Location map: hashtag → display name
+const LOCATION_MAP = {
+    'muasemarang': 'Semarang', 'makeupsemarang': 'Semarang', 'semarang': 'Semarang',
+    'muasolo': 'Solo', 'muajogja': 'Yogyakarta', 'muayogyakarta': 'Yogyakarta',
+    'muajepara': 'Jepara', 'muakudus': 'Kudus', 'muapati': 'Pati',
+    'muabatang': 'Batang', 'muategal': 'Tegal', 'muabrebes': 'Brebes',
+    'muakendal': 'Kendal', 'muarembang': 'Rembang', 'muablora': 'Blora',
+    'muademak': 'Demak', 'muabuwana': 'Buwana', 'muajawatengah': 'JawaTengah',
+    'muajateng': 'JawaTengah', 'muaselatan': 'Semarang', 'muabarat': 'Semarang',
+    'muatimur': 'Semarang', 'muajatim': 'JawaTimur', 'muasurabaya': 'Surabaya',
+    'muabandung': 'Bandung', 'muajakarta': 'Jakarta',
+    'muabol': 'Bol', 'muamaluku': 'Maluku', 'muasultra': 'SulawesiTenggara',
+};
+
 function extractLocation(hashtags) {
     if (!hashtags || hashtags.size === 0) return '';
-    const LOCATION_MAP = {
-        'muasemarang': 'Semarang', 'makeupsemarang': 'Semarang', 'semarang': 'Semarang',
-        'muasolo': 'Solo', 'muajogja': 'Yogyakarta', 'muajepara': 'Jepara',
-        'muakudus': 'Kudus', 'muapati': 'Pati', 'muabatang': 'Batang',
-        'muategal': 'Tegal', 'muabrebes': 'Brebes', 'muabandung': 'Bandung',
-        'muajakarta': 'Jakarta', 'muamaluku': 'Maluku',
-    };
     for (const tag of hashtags) {
         const clean = tag.toLowerCase().replace('#', '');
         if (LOCATION_MAP[clean]) return LOCATION_MAP[clean];
@@ -58,17 +77,32 @@ function extractLocation(hashtags) {
 function scoreComment(commentText, authorUsername) {
     const text = (commentText + ' ' + authorUsername).toLowerCase();
     let score = 0;
+
     if (commentText.length > 3) score += 1;
-    for (const kw of LOCATION_KEYWORDS) { if (text.includes(kw)) { score += 3; break; } }
-    for (const kw of CLIENT_KEYWORDS) { if (text.includes(kw)) { score += 4; break; } }
-    for (const kw of MUA_KEYWORDS) { if (text.includes(kw)) { score -= 5; break; } }
-    for (const kw of SUSPICIOUS_KEYWORDS) { if (text.includes(kw)) { score -= 3; break; } }
+
+    for (const kw of LOCATION_KEYWORDS) {
+        if (text.includes(kw)) { score += 3; break; }
+    }
+    for (const kw of CLIENT_KEYWORDS) {
+        if (text.includes(kw)) { score += 4; break; }
+    }
+    for (const kw of MUA_KEYWORDS) {
+        if (text.includes(kw)) { score -= 5; break; }
+    }
+    for (const kw of SUSPICIOUS_KEYWORDS) {
+        if (text.includes(kw)) { score -= 3; break; }
+    }
+
     if (commentText.length > 20) score += 1;
     if (commentText.length > 50) score += 2;
+
     return Math.max(0, score);
 }
 
-export function filterClients(comments, postAuthor) {
+/**
+ * Filter out non-clients from comment list.
+ */
+function filterClients(comments, postAuthor) {
     const authorLower = (postAuthor || '').toLowerCase();
     return comments
         .filter(c => {
@@ -85,40 +119,72 @@ export function filterClients(comments, postAuthor) {
         .sort((a, b) => b.score - a.score);
 }
 
-export async function extractClientsFromPosts(posts, concurrency = 3, batchDelayMs = 3000) {
+// ============== GET COMMENT METRICS ==============
+/**
+ * Get comment summary from a post.
+ */
+async function getCommentMetrics(postUrl) {
+    const post = await enrichPost(postUrl);
+    if (!post) return null;
+    return {
+        username: post.username,
+        postUrl: post.postUrl,
+        caption: post.caption,
+        hashtags: post.hashtags,
+        likes: post.likes,
+        comments: post.comments,
+        date: post.date,
+        shortcode: post.shortcode,
+    };
+}
+
+/**
+ * Extract potential clients from a list of posts (parallel batches).
+ */
+async function extractClientsFromPosts(posts, concurrency = 3, batchDelayMs = 3000) {
     const allClients = [];
     const seen = new Set();
 
     for (let i = 0; i < posts.length; i += concurrency) {
         const batch = posts.slice(i, i + concurrency);
+
+        // Enrich post data + fetch comments in parallel
         const batchResults = await Promise.all(batch.map(async (post) => {
             const url = post.postUrl || post.url;
-            const postData = await fetchAllPostCommentsGraphQL(url.split('/p/')[1]?.replace(/\/$/, '') || '', 100);
-            const clients = filterClients(postData, post.username || '');
-            return { clients, postData, totalComments: postData.length };
+            const postData = await enrichPost(url);
+            if (!postData || !postData.shortcode) return { clients: [], postData: null, totalComments: 0 };
+            const allComments = await fetchAllPostCommentsGraphQL(postData.shortcode, 100);
+            const clients = filterClients(allComments, postData.username);
+            return { clients, postData, totalComments: allComments.length };
         }));
 
         for (const result of batchResults) {
-            const postAuthor = result.postData?.username || '';
-            if (result.clients.length > 0) {
-                console.log(`  [COMMENTS] ${result.totalComments} total, ${result.clients.length} potential clients`);
+            const { clients, postData, totalComments } = result;
+            if (clients.length > 0) {
+                console.log(`  [COMMENTS] @${postData?.username}: ${totalComments} total, ${clients.length} potential clients`);
             }
-            for (const client of result.clients) {
+            for (const client of clients) {
                 const key = client.username.toLowerCase();
                 if (seen.has(key)) continue;
                 seen.add(key);
                 allClients.push({
                     username: client.username,
                     text: client.text,
-                    source: `@${postAuthor || 'unknown'}`,
+                    source: `@${postData?.username || 'unknown'}`,
                     via: 'comment',
-                    hashtags: result.postData?.hashtags || new Set(),
-                    location: extractLocation(result.postData?.hashtags),
+                    hashtags: postData?.hashtags || new Set(),
+                    location: extractLocation(postData?.hashtags),
                 });
             }
         }
 
-        if (i + concurrency < posts.length) await sleep(batchDelayMs);
+        if (i + concurrency < posts.length) {
+            await sleep(batchDelayMs);
+        }
     }
-    return allClients;
+
+    return allClients.sort((a, b) => b.clientScore - a.clientScore);
 }
+
+// ============== EXPORTS ==============
+export { getCommentMetrics, extractClientsFromPosts, filterClients, scoreComment };

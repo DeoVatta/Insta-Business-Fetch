@@ -1,22 +1,37 @@
 /**
  * Instagram Prospector - Profile Enricher
  *
- * Combines Playwright profile page + oEmbed post data to build complete profile.
+ * Combines Playwright profile page + API post data to build complete profile.
+ * No instagrapi npm — uses Playwright + /api/v1/media/{id}/info/
  */
 
 import {
     enrichProfileFromPage,
+    enrichPostFromApi,
     enrichPostsBatch,
     scrapeProfilePosts,
+    initBrowser,
 } from './scraper.js';
 import { classifyAccount, classifyFromHashtags, detectCategory, detectLocation, calculateEngagement } from './classifier.js';
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+import { REQUEST_DELAY, PROFILES_PER_HASHTAG } from './config.js';
 
+function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+}
+
+/**
+ * Enrich multiple profiles in parallel batches (for Phase 2 bulk processing).
+ * @param {Array} posts - Array of post objects
+ * @param {number} maxProfiles - Max profiles to process
+ * @param {number} concurrency - Max concurrent browser sessions
+ * @param {number} batchDelayMs - Delay between batches (ms)
+ */
 async function enrichProfilesBatch(posts, maxProfiles, concurrency = 2, batchDelayMs = 3000) {
     const results = [];
     const unique = [];
     const seen = new Set();
     for (const p of posts) {
+        // Shortcode is always present; username may be empty → OR-safe
         const key = p.shortcode;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -26,16 +41,27 @@ async function enrichProfilesBatch(posts, maxProfiles, concurrency = 2, batchDel
 
     for (let i = 0; i < unique.length; i += concurrency) {
         const batch = unique.slice(i, i + concurrency);
-        console.log(`  [BATCH] Enriching ${batch.length} profiles (${i + 1}-${i + batch.length})`);
+        console.log(`  [BATCH] Enriching ${batch.length} profiles (${i + 1}–${i + batch.length})`);
         const batchResults = await Promise.all(batch.map(p => enrichProfile(p.username, p)));
         results.push(...batchResults.filter(Boolean));
-        if (i + concurrency < unique.length) await sleep(batchDelayMs);
+        if (i + concurrency < unique.length) {
+            await sleep(batchDelayMs);
+        }
     }
     return results;
 }
 
+// ============== ENRICH PROFILE ==============
+/**
+ * Full profile enrichment:
+ * 1. Get profile data from profile page (bio, followers, following, posts, category)
+ * 2. Scrape recent posts from profile grid (for collab/mention discovery)
+ * 3. Classify: competitor/vendor/client
+ * 4. Calculate engagement
+ */
 async function enrichProfile(username, postData = null) {
     try {
+        // Get profile page data
         const profile = await enrichProfileFromPage(username);
 
         if (!profile || profile.followers === 0) {
@@ -45,6 +71,7 @@ async function enrichProfile(username, postData = null) {
             console.log(`  [BIO] ${(profile.bio || '').substring(0, 80)}`);
         }
 
+        // Merge with post data if provided
         if (postData) {
             profile.hashtags = new Set(postData.hashtags || []);
             profile.mentions = new Set((postData.mentions || []).map(m => m.toLowerCase()));
@@ -60,14 +87,15 @@ async function enrichProfile(username, postData = null) {
             profile.postComments = 0;
         }
 
+        // Scrape posts from profile for collab/mention discovery
         try {
             const profilePostUrls = await scrapeProfilePosts(username, 12);
             console.log(`  [POSTS] Found ${profilePostUrls.length} posts on profile`);
             profile.profilePostUrls = profilePostUrls;
-            // Last post = most recent = first URL (grid is newest-first)
-            profile.lastPostUrl = profilePostUrls[0] || '';
-            if (profilePostUrls.length > 1) {
-                const enrichedPosts = await enrichPostsBatch(profilePostUrls.slice(1, 7), 3, 2000);
+
+            // Enrich posts in parallel batches (3 concurrent, 2s between batches)
+            if (profilePostUrls.length > 0) {
+                const enrichedPosts = await enrichPostsBatch(profilePostUrls.slice(0, 6), 3, 2000);
                 for (const pd of enrichedPosts) {
                     pd.hashtags.forEach(h => profile.hashtags.add(h));
                     pd.mentions.forEach(m => profile.mentions.add(m));
@@ -78,16 +106,24 @@ async function enrichProfile(username, postData = null) {
             console.log(`  [WARN] Could not scrape profile posts @${username}: ${e.message}`);
         }
 
+        // Classify
+        const fullText = (profile.bio || '') + ' ' + (profile.displayName || '') + ' ' + (profile.category || '');
         profile.type = classifyAccount(profile.bio || '', profile.displayName || '');
         profile.location = detectLocation(profile.bio || '', profile.displayName || '', profile.nativeLocation || '');
         profile.category = detectCategory(profile.bio || '', profile.displayName || '', profile.type);
 
+        // Engagement (use post likes/comments as proxy, or from profile data)
         if (profile.followers > 0) {
-            profile.engagementRate = calculateEngagement(profile.postLikes, profile.postComments, profile.followers);
+            profile.engagementRate = calculateEngagement(
+                profile.postLikes,
+                profile.postComments,
+                profile.followers
+            );
         } else {
             profile.engagementRate = 0;
         }
 
+        // If bio is empty OR type is still client, try classify from hashtags
         const hasBio = (profile.bio || '').trim().length > 5;
         if (!hasBio || (profile.type === 'client' && profile.hashtags.size > 0)) {
             profile.type = classifyFromHashtags([...profile.hashtags]);
@@ -101,10 +137,12 @@ async function enrichProfile(username, postData = null) {
         console.log(`  [DISC] Collabs: ${[...profile.collabs].slice(0, 3).join(', ') || 'none'}`);
 
         return profile;
+
     } catch (e) {
         console.log(`  [ERROR] Failed to enrich @${username}: ${e.message}`);
         return null;
     }
 }
 
-export { enrichProfile, enrichProfilesBatch };
+// ============== EXPORTS ==============
+export { enrichProfile, enrichProfilesBatch, initBrowser };

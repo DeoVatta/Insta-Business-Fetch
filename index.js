@@ -26,8 +26,8 @@ import { enrichProfile } from './src/enricher.js';
 import { filterClients } from './src/comments.js';
 import { classifyProfilesBatch, classifyHashtagsBatch } from './src/ai-classifier.js';
 import {
-    initSheets, readHashtags, readHashtagsInSheet, readVisitedProfiles,
-    writeHashtagBatch, markHashtagStatus,
+    initSheets, readHashtags, readHashtagsWithStatus, readHashtagsInSheet, readVisitedProfiles,
+    writeHashtagBatch, markHashtagStatus, resetHashtagStatuses,
     writeProfile, writeClientFromComment,
 } from './src/sheets.js';
 import { isIndonesian } from './src/classifier.js';
@@ -39,7 +39,7 @@ import {
     isVisited, markVisited, markEnriched, getQueueStats,
     addHashtag, getHashtags,
     incStats, bufferProfile, getProfileBuffer, clearProfileBuffer,
-    printStats,
+    printStats, clearState,
 } from './src/state.js';
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -72,10 +72,6 @@ async function run() {
 
     // Get pending hashtags from sheet
     const pendingHashtags = await readHashtags();
-    if (pendingHashtags.length === 0) {
-        console.log('[ERROR] No pending hashtags in Hashtags sheet. Add hashtags with status=Pending.');
-        process.exit(1);
-    }
 
     // Check which hashtags are already done in state
     const doneInState = new Set(
@@ -83,15 +79,32 @@ async function run() {
             .filter(([, v]) => v.status === 'Executed')
             .map(([k]) => k)
     );
-    const availableHashtags = pendingHashtags.filter(h => {
+    let availableHashtags = pendingHashtags.filter(h => {
         const clean = h.replace(/^#/, '').toLowerCase().trim();
         return !doneInState.has(clean);
     });
 
+    // If no available hashtags: check if sheet has any hashtags at all
     if (availableHashtags.length === 0) {
-        console.log('[INFO] All hashtags in sheet already Executed in state. Starting fresh scan.');
-        await clearState();
-        availableHashtags.push(...pendingHashtags);
+        // Read all hashtags (including Executed) to check status
+        const allHashtagsRaw = await readHashtagsWithStatus();
+        const allTags = allHashtagsRaw.map(r => r.tag);
+
+        if (allTags.length > 0) {
+            // Sheet has hashtags but all Executed → reset to Pending
+            console.log('[INFO] All hashtags executed — resetting sheet statuses to Pending...');
+            await resetHashtagStatuses();
+            // Reload pending
+            const reloaded = await readHashtags();
+            availableHashtags = reloaded;
+            await clearState();
+            console.log('[INFO] Reset complete — fresh scan starting.');
+        }
+
+        if (availableHashtags.length === 0) {
+            console.log('[ERROR] No pending hashtags in Hashtags sheet. Add hashtags with status=Pending.');
+            process.exit(1);
+        }
     }
 
     console.log(`[RUN] ${availableHashtags.length} available hashtags to process`);

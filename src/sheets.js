@@ -226,6 +226,55 @@ async function markHashtagStatus(hashtag, status) {
     }
 }
 
+// Read ALL hashtags with their status (including Executed)
+async function readHashtagsWithStatus() {
+    const rows = await readRange('Hashtags!A1:D2000');
+    const hashtags = [];
+    for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || !row[1]) continue;
+        const tag = row[1].trim();
+        const found = row[2] ? parseInt(row[2]) : 0;
+        const status = (row[3] || '').trim();
+        if (tag.startsWith('#')) {
+            hashtags.push({ tag, found, status });
+        }
+    }
+    return hashtags;
+}
+
+// Reset all Executed hashtags back to Pending (for infinite loop re-scan)
+async function resetHashtagStatuses() {
+    if (!sheetsClient) { console.log('[SHEETS] No client — skip reset'); return; }
+    const rows = await readRange('Hashtags!A1:D2000');
+    console.log(`[SHEETS] Reset: found ${rows.length} rows in Hashtags sheet`);
+    const updates = [];
+    for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        if (row && row[3] === 'Executed') {
+            updates.push({ rowIndex: i + 1, hashtag: row[1] });
+        }
+    }
+    console.log(`[SHEETS] Reset: ${updates.length} Executed hashtags found to reset`);
+    if (updates.length === 0) return;
+
+    // Batch update all statuses to Pending
+    for (const { rowIndex, hashtag } of updates) {
+        try {
+            await sheetsClient.spreadsheets.values.update({
+                spreadsheetId: SHEETS_ID,
+                range: `Hashtags!D${rowIndex}:D${rowIndex}`,
+                valueInputOption: 'RAW',
+                resource: { values: [['Pending']] }
+            });
+            console.log(`[SHEETS] Reset: ${hashtag} → Pending`);
+        } catch (e) {
+            console.log(`[SHEETS] Reset error for ${hashtag}: ${e.message}`);
+        }
+    }
+    console.log(`[SHEETS] Reset ${updates.length} hashtags to Pending`);
+}
+
 // Extract WhatsApp from bio
 function extractWhatsApp(bio = '') {
     const patterns = [
@@ -326,7 +375,7 @@ async function writeClientFromComment(clientData, existingUsernames) {
 }
 
 export {
-    initSheets, readHashtags, readHashtagsInSheet, readVisitedProfiles,
-    writeHashtagBatch, markHashtagStatus,
+    initSheets, readHashtags, readHashtagsWithStatus, readHashtagsInSheet, readVisitedProfiles,
+    writeHashtagBatch, markHashtagStatus, resetHashtagStatuses,
     writeProfile, writeClientFromComment,
 };
