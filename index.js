@@ -39,7 +39,7 @@ import {
     isVisited, markVisited, markEnriched, getQueueStats,
     addHashtag, getHashtags,
     incStats, bufferProfile, getProfileBuffer, clearProfileBuffer,
-    printStats, clearState,
+    printStats,
 } from './src/state.js';
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -94,11 +94,10 @@ async function run() {
             // Sheet has hashtags but all Executed → reset to Pending
             console.log('[INFO] All hashtags executed — resetting sheet statuses to Pending...');
             await resetHashtagStatuses();
-            // Reload pending
+            // Reload pending — sheet now has Pending statuses
             const reloaded = await readHashtags();
             availableHashtags = reloaded;
-            await clearState();
-            console.log('[INFO] Reset complete — fresh scan starting.');
+            console.log('[INFO] Reset complete — processing hashtags.');
         }
 
         if (availableHashtags.length === 0) {
