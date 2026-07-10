@@ -149,8 +149,8 @@ async function readHashtags() {
         if (!row || !row[1]) continue;
         const tag = row[1].trim();
         const status = (row[3] || '').trim();
-        if (tag.startsWith('#') && status !== 'Executed') {
-            hashtags.push(tag);
+        if (tag && !['Executed'].includes(status)) {
+            hashtags.push(tag.startsWith('#') ? tag : '#' + tag);
         }
     }
     console.log(`[SHEETS] Loaded ${hashtags.length} pending hashtags`);
@@ -236,8 +236,8 @@ async function readHashtagsWithStatus() {
         const tag = row[1].trim();
         const found = row[2] ? parseInt(row[2]) : 0;
         const status = (row[3] || '').trim();
-        if (tag.startsWith('#')) {
-            hashtags.push({ tag, found, status });
+        if (tag) {
+            hashtags.push({ tag: tag.startsWith('#') ? tag : '#' + tag, found, status });
         }
     }
     return hashtags;
@@ -251,11 +251,11 @@ async function resetHashtagStatuses() {
     const updates = [];
     for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
-        if (row && row[3] === 'Executed') {
+        if (row && row[3] && row[3] !== 'Pending') {
             updates.push({ rowIndex: i + 1, hashtag: row[1] });
         }
     }
-    console.log(`[SHEETS] Reset: ${updates.length} Executed hashtags found to reset`);
+    console.log(`[SHEETS] Reset: ${updates.length} non-Pending hashtags found to reset`);
     if (updates.length === 0) return;
 
     // Batch update all statuses to Pending
