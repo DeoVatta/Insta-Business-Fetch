@@ -74,6 +74,28 @@ The pipeline expects a Google Sheet with one tab: **Instagram**. All data (compe
 
 **Hashtag source:** Add hashtags in column A of the sheet (as `#muasemarang`, `#riasjogja`, etc.). Rows starting with `#` are read as hashtags.
 
+## AI Classification
+
+The pipeline uses **Claude Haiku** via Olagon Gateway for batch AI classification. Key limits tested:
+
+| Metric | Value |
+|--------|-------|
+| Max profiles per request | **150** |
+| Output token limit | 8,192 |
+| Weekly quota | ~5 hours |
+| Estimated profiles/week | ~7,200 (150 × 48 runs) |
+| Typical response time | 15-25s per batch |
+
+**AI does:** Category, Location (city only), WhatsApp extraction, Website extraction, Engagement analysis.
+
+**Config:** Set in `.env`:
+```
+OLAGON_API_KEY=your_olagon_api_key_here
+OLAGON_BASE_URL=https://gateway.olagon.site
+```
+
+AI runs as Phase 5 — collects up to 150 enriched profiles, sends one batch request, then writes all AI results to the sheet. Falls back to regex extraction if AI fails.
+
 > **Note:** Copy your Google Sheets ID from the URL: `docs.google.com/spreadsheets/d/YOUR_SHEETS_ID_HERE/edit`
 
 ### 4. Run

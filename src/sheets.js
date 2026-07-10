@@ -244,24 +244,35 @@ async function writeProfile(profile, existingUsernames) {
         return;
     }
 
+    // AI-enriched fields take priority; fallback to regex extraction
     const bio = profile.bio || '';
-    const wa = extractWhatsApp(bio);
-    const website = extractWebsite(bio);
+    const wa = profile.whatsapp || extractWhatsApp(bio);
+    const website = profile.website || extractWebsite(bio);
 
-    // Row matches SHEET_HEADER: No|A|Nama|B|Instagram|C|Whatsapp|D|Website|E|Category|F|Followers|G|Post|H|Location|I|Last Post|J|Analytics|K|Status|L
+    // Analytics: use AI result if available, otherwise calculate
+    let analyticsStr;
+    if (profile.analytics) {
+        analyticsStr = typeof profile.analytics === 'string' ? profile.analytics : `${profile.analytics}%`;
+    } else if (profile.followers && profile.followers > 0) {
+        const rate = (((profile.postLikes || 0) + (profile.postComments || 0)) / profile.followers * 100).toFixed(2);
+        analyticsStr = `${rate}%`;
+    } else {
+        analyticsStr = 'N/A';
+    }
+
     const row = [
-        '',                                      // A: No — empty, Sheets auto-increments
-        profile.displayName || username,         // B: Nama
-        profile.profileUrl || `https://instagram.com/${username}/`,  // C: Instagram
-        wa,                                      // D: Whatsapp
-        website,                                 // E: Website
-        profile.category || '',                  // F: Category
-        profile.followers || 0,                  // G: Followers
-        profile.posts || 0,                      // H: Post
-        profile.location || '',                  // I: Location
-        profile.lastPostUrl || '',               // J: Last Post
-        formatAnalytics(profile.followers, profile.postLikes || 0, profile.postComments || 0), // K: Analytics
-        'Pending',                               // L: Status (user fills in manually)
+        '',                                              // A: No
+        profile.displayName || username,                 // B: Nama
+        profile.profileUrl || `https://instagram.com/${username}/`, // C: Instagram
+        wa,                                              // D: Whatsapp
+        website,                                         // E: Website
+        profile.category || '',                          // F: Category
+        profile.followers || 0,                          // G: Followers
+        profile.posts || 0,                              // H: Post
+        profile.location || '',                          // I: Location
+        profile.lastPostUrl || '',                       // J: Last Post
+        analyticsStr,                                    // K: Analytics
+        'Pending',                                       // L: Status
     ];
 
     const ok = await appendRow(row);

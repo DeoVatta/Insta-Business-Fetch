@@ -12,8 +12,11 @@ export const IG_USERNAME = process.env.IG_USERNAME || '';
 export const IG_PASSWORD = process.env.IG_PASSWORD || '';
 
 // Google Sheets output — set in .env
-// Create a sheet with tabs: Competitors, Vendor, Client, VendorHashtags
 export const SHEETS_ID = process.env.GOOGLE_SHEETS_ID || '';
+
+// Olagon AI Gateway — set in .env
+export const OLAGON_API_KEY = process.env.OLAGON_API_KEY || '';
+export const OLAGON_BASE_URL = process.env.OLAGON_BASE_URL || 'https://gateway.olagon.site';
 
 // Limits
 export const HASHTAGS_PER_RUN = 1;

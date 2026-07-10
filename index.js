@@ -2,15 +2,15 @@
  * Instagram Prospector - Sequential Pipeline
  *
  * Single "Instagram" sheet for all data.
- * Hashtag source: add hashtags directly in Google Sheets column A (as #hashtag).
+ * AI batch classification via Olagon Gateway (up to 150 profiles/request).
  *
  * Pipeline:
  * PHASE 1  — Scrape hashtag → get all post data
  * PHASE 2  — Loop posts sequentially
  * PHASE 3  — Indonesian indicator check
  * PHASE 4  — Enrich profile → classify
- * PHASE 5  — Write to Instagram sheet immediately
- * PHASE 6  — Collect @mentions + collabs → queue for discovery
+ * PHASE 5  — Collect up to 150 profiles → AI batch classify
+ * PHASE 6  — Write AI-enriched data to Instagram sheet
  * PHASE 7  — Comment extraction → client discovery
  * PHASE 8  — Every 20 posts: re-login
  */
@@ -21,18 +21,21 @@ import {
 } from './src/scraper.js';
 import { enrichProfile } from './src/enricher.js';
 import { filterClients } from './src/comments.js';
+import { classifyProfilesBatch } from './src/ai-classifier.js';
 import {
     initSheets, readHashtags, readVisitedProfiles,
     writeProfile, writeClientFromComment,
 } from './src/sheets.js';
 import { isIndonesian } from './src/classifier.js';
-import { MAX_COLLAB_DEPTH, MAX_API_ERRORS_CONSECUTIVE, PHASE2_TIMEOUT_MIN } from './src/config.js';
+import { MAX_COLLAB_DEPTH, MAX_API_ERRORS_CONSECUTIVE, PHASE2_TIMEOUT_MIN, REQUEST_DELAY } from './src/config.js';
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 let _currentHashtag = null;
 
 async function run() {
     console.log('='.repeat(60));
-    console.log('INSTAGRAM PROSPECTOR — Sequential Pipeline');
+    console.log('INSTAGRAM PROSPECTOR — Sequential Pipeline + AI Classification');
     console.log('='.repeat(60));
 
     // INIT
@@ -41,18 +44,17 @@ async function run() {
     await initBrowser();
     await refreshCookieStr();
 
-    // Hashtags are stored in the Instagram sheet column A (as #hashtag)
-    // Next-run tracking: scans for last processed #hashtag row
+    // Hashtags stored in column A of Instagram sheet (as #hashtag)
     const allHashtags = await readHashtags();
     if (allHashtags.length === 0) {
-        console.log('[ERROR] No hashtags found in Google Sheet column A. Add hashtags as #muasemarang, #riasjogja, etc.');
+        console.log('[ERROR] No hashtags in sheet column A. Add as #muasemarang, #riasjogja, etc.');
         process.exit(1);
     }
 
-    const nextIdx = 0; // for now, always start from first — supports wrap-around later
+    const nextIdx = 0;
     const visited = await readVisitedProfiles();
 
-    let stats = { profiles: 0, clients: 0, errors: 0 };
+    let stats = { profiles: 0, clients: 0, errors: 0, aiProcessed: 0 };
     let globalErrorCount = 0;
     let phase2Start = Date.now();
     let postCount = 0;
@@ -78,11 +80,12 @@ async function run() {
         return;
     }
 
-    // PHASE 2-5 — Loop posts
+    // PHASE 2-4 — Loop posts: enrich profiles
     console.log('-'.repeat(60));
-    console.log('[PHASE 2-5] Processing posts...');
+    console.log('[PHASE 2-4] Enriching profiles...');
     console.log('-'.repeat(60) + '\n');
 
+    const enrichedBatch = []; // collected for AI batch
     const discoveryQueue = [];
     const seenInQueue = new Set();
 
@@ -108,30 +111,30 @@ async function run() {
         const postUrl = `https://www.instagram.com/p/${shortcode}/`;
         console.log(`\n[POST ${postNum}/${posts.length}] ${shortcode}`);
 
-        // PHASE 2 — Enrich post (oEmbed)
+        // Enrich post (oEmbed)
         const postData = await enrichPost(postUrl);
         if (!postData || !postData.username) {
-            console.log(`  [SKIP] No username from post`);
+            console.log(`  [SKIP] No username`);
             globalErrorCount++;
             continue;
         }
 
         const username = postData.username.toLowerCase();
         if (username === 'deovatta' || !username) {
-            console.log(`  [SKIP] Own account or empty`);
+            console.log(`  [SKIP] Own account`);
             continue;
         }
 
         const isNewProfile = !visited.has(username);
 
-        // PHASE 3 — Indonesian check via post text
+        // Indonesian check via post text
         const postText = ((postData.caption || '') + ' ' + (postData.hashtags || []).join(' ')).toLowerCase();
         if (!isIndonesian(postText, [], '')) {
             console.log(`  [SKIP] @${username} — not Indonesian`);
             continue;
         }
 
-        // PHASE 4 — Enrich profile
+        // Enrich profile
         const profile = await enrichProfile(username, postData);
         if (!profile) {
             globalErrorCount++;
@@ -142,7 +145,7 @@ async function run() {
         }
         globalErrorCount = 0;
 
-        // Indonesian check via profile bio/location
+        // Indonesian check via profile
         if (!isIndonesian(profile.bio || '', [...(profile.hashtags || [])], profile.nativeLocation || '')) {
             console.log(`  [SKIP] @${username} — profile not Indonesian`);
             continue;
@@ -151,17 +154,14 @@ async function run() {
         profile.sourceHashtag = hashtag;
         profile.via = 'hashtag';
 
-        // PHASE 5 — Write to Instagram sheet
+        // Collect for AI batch
         if (isNewProfile) {
-            await writeProfile(profile, visited);
+            enrichedBatch.push(profile);
             visited.add(username);
             stats.profiles++;
-            console.log(`  [SAVED] @${username} → ${profile.type} | ${profile.category}`);
-        } else {
-            console.log(`  [REVISIT] @${username} — already saved`);
         }
 
-        // PHASE 6 — Collect mentions + collabs for discovery
+        // Collect mentions + collabs
         const mentions = [...(postData.mentions || [])];
         const collabs = [...(postData.collabs || [])];
 
@@ -181,6 +181,24 @@ async function run() {
         }
     }
 
+    // PHASE 5 — AI batch classification
+    console.log('\n' + '-'.repeat(60));
+    console.log(`[PHASE 5] AI batch classification — ${enrichedBatch.length} profiles...`);
+    console.log('-'.repeat(60) + '\n');
+
+    const aiBatch = await classifyProfilesBatch(enrichedBatch);
+    stats.aiProcessed = aiBatch.length;
+
+    // PHASE 6 — Write AI-enriched profiles to sheet
+    console.log('\n' + '-'.repeat(60));
+    console.log(`[PHASE 6] Writing ${aiBatch.length} profiles to sheet...`);
+    console.log('-'.repeat(60) + '\n');
+
+    for (const profile of aiBatch) {
+        await writeProfile(profile, visited);
+        console.log(`  → @${profile.username} | ${profile.category} | ${profile.location} | WA: ${profile.whatsapp || 'N/A'}`);
+    }
+
     // PHASE 7 — Comment extraction → client discovery
     console.log('\n' + '-'.repeat(60));
     console.log(`[PHASE 7] Comment extraction (${posts.slice(-10).length} posts)...`);
@@ -196,10 +214,7 @@ async function run() {
 
         const postAuthor = (post.username || '').toLowerCase();
         const allComments = await fetchAllPostCommentsGraphQL(shortcode, 100);
-        if (!allComments || allComments.length === 0) {
-            console.log(`  → 0 comments`);
-            continue;
-        }
+        if (!allComments || allComments.length === 0) { console.log(`  → 0 comments`); continue; }
         console.log(`  → ${allComments.length} comments`);
 
         const clients = filterClients(allComments, postAuthor || null);
@@ -220,16 +235,19 @@ async function run() {
 
             await writeClientFromComment(clientData, visited);
             stats.clients++;
-            console.log(`    [CLIENT SAVED] @${cUser}`);
+            console.log(`    [CLIENT] @${cUser}`);
         }
+
+        await sleep(REQUEST_DELAY * 1000);
     }
 
-    // PHASE 6b — Discovery queue (mentions + collabs)
+    // PHASE 6b — Discovery queue (AI-enriched)
     console.log('\n' + '-'.repeat(60));
     console.log(`[PHASE 6b] Discovery queue (${discoveryQueue.length} profiles)...`);
     console.log('-'.repeat(60) + '\n');
 
     let discCount = 0, discErrors = 0, consecutiveSeen = 0, discPostCount = 0;
+    const discoveryBatch = [];
 
     while (discoveryQueue.length > 0) {
         const item = discoveryQueue.shift();
@@ -244,7 +262,7 @@ async function run() {
         discCount++;
 
         if (discPostCount > 0 && discPostCount % 20 === 0) {
-            console.log(`\n[PHASE 8] Re-login (discovery count=${discCount})...`);
+            console.log(`\n[PHASE 8] Re-login (discovery=${discCount})...`);
             await refreshCookieStr();
         }
         discPostCount++;
@@ -254,15 +272,10 @@ async function run() {
         const profile = await enrichProfile(item.username);
         if (!profile) {
             discErrors++;
-            globalErrorCount++;
-            if (discErrors >= (MAX_API_ERRORS_CONSECUTIVE || 20)) {
-                console.log(`\n[STOP] ${discErrors} consecutive errors.`); break;
-            }
+            if (discErrors >= (MAX_API_ERRORS_CONSECUTIVE || 20)) { console.log(`\n[STOP] ${discErrors} errors.`); break; }
             continue;
         }
-
         discErrors = 0;
-        globalErrorCount = 0;
 
         if (!isIndonesian(profile.bio || '', [...(profile.hashtags || [])], profile.nativeLocation || '')) {
             console.log(`  [SKIP] @${item.username} — not Indonesian`); continue;
@@ -271,18 +284,27 @@ async function run() {
         profile.sourceHashtag = `collab via @${item.source}`;
         profile.via = 'discovery';
 
-        await writeProfile(profile, visited);
-        stats.profiles++;
-        console.log(`  [SAVED] @${item.username} → ${profile.type} | ${profile.category}`);
+        discoveryBatch.push(profile);
 
-        if (item.depth < (MAX_COLLAB_DEPTH || 2)) {
-            for (const m of [...(profile.mentions || []), ...(profile.collabs || [])]) {
-                const mLower = m.toLowerCase();
-                if (!visited.has(mLower) && !seenInQueue.has(mLower)) {
-                    seenInQueue.add(mLower);
-                    discoveryQueue.push({ username: mLower, depth: item.depth + 1, source: item.username });
-                }
+        // Batch AI processing every 50 discovery profiles
+        if (discoveryBatch.length >= 50) {
+            const aiResults = await classifyProfilesBatch(discoveryBatch);
+            for (const p of aiResults) {
+                await writeProfile(p, visited);
+                stats.aiProcessed++;
+                console.log(`  → @${p.username} | ${p.category} | ${p.location}`);
             }
+            discoveryBatch.length = 0;
+        }
+    }
+
+    // Write remaining discovery profiles
+    if (discoveryBatch.length > 0) {
+        const aiResults = await classifyProfilesBatch(discoveryBatch);
+        for (const p of aiResults) {
+            await writeProfile(p, visited);
+            stats.aiProcessed++;
+            console.log(`  → @${p.username} | ${p.category} | ${p.location}`);
         }
     }
 
@@ -296,6 +318,7 @@ function printSummary(stats, hashtag, idx, total) {
     console.log('='.repeat(60));
     console.log(`  Hashtag:   ${hashtag} (index ${idx} of ${total})`);
     console.log(`  Profiles:  ${stats.profiles}`);
+    console.log(`  AI Processed: ${stats.aiProcessed}`);
     console.log(`  Clients:   ${stats.clients}`);
     console.log('='.repeat(60));
 }
