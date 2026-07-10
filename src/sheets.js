@@ -294,7 +294,8 @@ async function writeHashtagBatch(hashtags, existingHashtags) {
         const clean = tag.replace(/^#/, '').toLowerCase().trim();
         if (!clean || existingHashtags.has(clean)) continue;
         existingHashtags.add(clean);
-        const ok = await appendRow('Hashtags', 'D', [[`#${clean}`, found, 'Pending']]);
+        // 4 values: A=ROW()-1, B=hashtag, C=found, D=Pending
+        const ok = await appendRow('Hashtags', 'D', [['=ROW()-1', `#${clean}`, found, 'Pending']]);
         if (ok) written++;
     }
     console.log(`[SHEETS] ${written}/${hashtags.length} hashtags written to Hashtags sheet`);
