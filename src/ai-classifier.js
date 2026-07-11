@@ -2,12 +2,12 @@
  * Instagram Prospector - AI Classifier
  *
  * Batch AI classification via Olagon Gateway (Claude Haiku).
- * Max 150 profiles per request. No thinking block — outputs plain JSON.
+ * Max 150 profiles per request. No thinking block -- outputs plain JSON.
  *
  * Pipeline:
  * 1. Collect enriched profiles (up to 150)
  * 2. Send to AI in one batch request
- * 3. Parse response → merge into profiles
+ * 3. Parse response -- merge into profiles
  * 4. Write to Sheets
  */
 
@@ -52,27 +52,26 @@ function aiRequest(messages, systemPrompt, maxTokens = 8192, retries = 0) {
             res.on('data', c => body += c);
             res.on('end', () => {
                 if (res.statusCode === 429) {
-                    // Rate limited
                     if (retries < MAX_RETRIES) {
                         const delay = BASE_DELAY_MS * Math.pow(2, retries);
-                        console.log(`  [AI] Rate limited (${res.statusCode}) — retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
+                        console.log(`  [AI] Rate limited (${res.statusCode}) -- retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
                         setTimeout(() => {
                             resolve(aiRequest(messages, systemPrompt, maxTokens, retries + 1));
                         }, delay);
                     } else {
-                        reject(new Error(`Rate limited after ${MAX_RETRIES} retries — will retry with longer delay`));
+                        reject(new Error(`Rate limited after ${MAX_RETRIES} retries -- will retry with longer delay`));
                     }
                     return;
                 }
                 if (res.statusCode !== 200) {
                     if (retries < MAX_RETRIES) {
                         const delay = BASE_DELAY_MS * Math.pow(2, retries);
-                        console.log(`  [AI] Non-200 (${res.statusCode}) — retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
+                        console.log(`  [AI] Non-200 (${res.statusCode}) -- retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
                         setTimeout(() => {
                             resolve(aiRequest(messages, systemPrompt, maxTokens, retries + 1));
                         }, delay);
                     } else {
-                        reject(new Error(`AI request failed: ${res.statusCode} — ${body.slice(0, 200)}`));
+                        reject(new Error(`AI request failed: ${res.statusCode} -- ${body.slice(0, 200)}`));
                     }
                     return;
                 }
@@ -83,12 +82,12 @@ function aiRequest(messages, systemPrompt, maxTokens = 8192, retries = 0) {
                 } catch (e) {
                     if (retries < MAX_RETRIES) {
                         const delay = BASE_DELAY_MS * Math.pow(2, retries);
-                        console.log(`  [AI] Parse error — retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
+                        console.log(`  [AI] Parse error -- retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
                         setTimeout(() => {
                             resolve(aiRequest(messages, systemPrompt, maxTokens, retries + 1));
                         }, delay);
                     } else {
-                        reject(new Error(`AI parse error: ${e.message} — body: ${body.slice(0, 300)}`));
+                        reject(new Error(`AI parse error: ${e.message} -- body: ${body.slice(0, 300)}`));
                     }
                 }
             });
@@ -96,7 +95,7 @@ function aiRequest(messages, systemPrompt, maxTokens = 8192, retries = 0) {
         req.on('error', e => {
             if (retries < MAX_RETRIES) {
                 const delay = BASE_DELAY_MS * Math.pow(2, retries);
-                console.log(`  [AI] Network error — retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
+                console.log(`  [AI] Network error -- retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
                 setTimeout(() => resolve(aiRequest(messages, systemPrompt, maxTokens, retries + 1)), delay);
             } else {
                 reject(e);
@@ -106,7 +105,7 @@ function aiRequest(messages, systemPrompt, maxTokens = 8192, retries = 0) {
             req.destroy();
             if (retries < MAX_RETRIES) {
                 const delay = BASE_DELAY_MS * Math.pow(2, retries);
-                console.log(`  [AI] Request timeout — retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
+                console.log(`  [AI] Request timeout -- retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
                 setTimeout(() => {
                     resolve(aiRequest(messages, systemPrompt, maxTokens, retries + 1));
                 }, delay);
@@ -163,7 +162,7 @@ function extractWebsite(bio = '') {
 // ===== BATCH CLASSIFY =====
 const SYSTEM_PROMPT = `You are a data extraction assistant for Indonesian business Instagram profiles.
 
-Analyze the profile data and extract business information. Return a JSON array ONLY — no thinking, no explanation, no markdown, no text outside the JSON.
+Analyze the profile data and extract business information. Return a JSON array ONLY -- no thinking, no explanation, no markdown, no text outside the JSON.
 
 Each entry:
 {"u":"username","c":"category","l":"location","w":"whatsapp","e":"website","eng":"engagement_rate_percent","note":"1-line-summary"}
@@ -189,7 +188,6 @@ function parseAiResponse(text, profileCount) {
     try {
         return JSON.parse(stripped);
     } catch (e) {
-        // Try to extract JSON array from text
         const startIdx = stripped.indexOf('[');
         const endIdx = stripped.lastIndexOf(']');
         if (startIdx !== -1 && endIdx !== -1) {
@@ -205,14 +203,14 @@ function parseAiResponse(text, profileCount) {
 
 /**
  * Classify a batch of profiles via AI.
- * @param {Array} profiles — enriched profile objects
- * @param {number} concurrency — not used (sequential per batch)
- * @returns {Array} — profiles with AI fields merged: category, location, whatsapp, website, analytics, aiNote
+ * @param {Array} profiles -- enriched profile objects
+ * @param {number} concurrency -- not used (sequential per batch)
+ * @returns {Array} -- profiles with AI fields merged: category, location, whatsapp, website, analytics, aiNote
  */
 export async function classifyProfilesBatch(profiles, concurrency = 1) {
     if (!profiles || profiles.length === 0) return [];
     if (!OLAGON_API_KEY) {
-        console.warn('[AI] OLAGON_API_KEY not set — skipping AI classification');
+        console.warn('[AI] OLAGON_API_KEY not set -- skipping AI classification');
         return profiles;
     }
 
@@ -231,7 +229,6 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
 
         console.log(`[AI] Batch ${batchNum}/${batches.length}: ${batch.length} profiles...`);
 
-        // Build compact input
         const input = batch.map(p => ({
             u: p.username || '',
             n: p.displayName || '',
@@ -250,13 +247,11 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
             const text = await aiRequest(messages, SYSTEM_PROMPT);
             const parsed = parseAiResponse(text, batch.length);
 
-            // Debug: log first profile's AI result
             if (parsed && parsed.length > 0) {
                 const first = parsed[0];
-                console.log(`  [AI DEBUG] @${first.u} → category="${first.c}", location="${first.l}", wa="${first.w}", eng="${first.eng}"`);
+                console.log(`  [AI DEBUG] @${first.u} --> category="${first.c}", location="${first.l}", wa="${first.w}", eng="${first.eng}"`);
             }
 
-            // Build lookup by username
             const lookup = {};
             for (const item of parsed) {
                 lookup[item.u?.toLowerCase()] = item;
@@ -266,7 +261,6 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
                 const key = (profile.username || '').toLowerCase();
                 const ai = lookup[key] || {};
 
-                // AI is PRIMARY — use whatever AI returned, just normalise whitespace
                 const rawAiCategory = ai.c || '';
                 const finalCategory = normaliseCategory(rawAiCategory) || 'Unknown';
                 const aiLocation = ai.l || profile.location || '';
@@ -289,10 +283,12 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
 
             console.log(`[AI] Batch ${batchNum} done: ${parsed.length} results`);
         } catch (e) {
-            console.warn(`[AI] Batch ${batchNum} failed: ${e.message} — retrying...`);
+            console.warn(`[AI] Batch ${batchNum} failed: ${e.message} -- retrying...`);
             await new Promise(r => setTimeout(r, 30000));
             b--;
             continue;
+        }
+    }
 
     return results;
 }
@@ -304,7 +300,7 @@ Analyze each hashtag and determine if it is related to a business or brand.
 
 Each hashtag has the format: #hashtag (e.g. #muasemarang, #riasjogja)
 
-Return a JSON array ONLY — no thinking, no explanation, no markdown.
+Return a JSON array ONLY -- no thinking, no explanation, no markdown.
 
 Each entry:
 {"h":"hashtag_name_without_#","business":true_or_false,"reason":"short reason in Indonesian"}
@@ -321,7 +317,7 @@ business=false if:
 - Personal/use hashtags unrelated to wedding services
 - Event-only hashtags without vendor relation
 
-Be strict — only mark true if clearly a business/service hashtag.`;
+Be strict -- only mark true if clearly a business/service hashtag.`;
 
 // Max 200 hashtags per request
 const HT_BATCH_MAX = 200;
@@ -329,7 +325,7 @@ const HT_BATCH_MAX = 200;
 export async function classifyHashtagsBatch(hashtags) {
     if (!hashtags || hashtags.length === 0) return [];
     if (!OLAGON_API_KEY) {
-        console.warn('[AI] OLAGON_API_KEY not set — hashtag classification skipped, pipeline will retry');
+        console.warn('[AI] OLAGON_API_KEY not set -- hashtag classification skipped, pipeline will retry');
         throw new Error('OLAGON_API_KEY not configured');
     }
 
@@ -370,7 +366,6 @@ export async function classifyHashtagsBatch(hashtags) {
 
             console.log(`[AI] Hashtag batch ${batchNum}: ${parsed.length} results`);
         } catch (e) {
-            // No fallback — retry will handle via aiRequest; propagate error
             console.warn(`[AI] Hashtag batch ${batchNum} failed: ${e.message}`);
             throw e;
         }

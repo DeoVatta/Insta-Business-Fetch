@@ -13,7 +13,7 @@ import { GoogleAuth } from 'google-auth-library';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { classifyProfilesBatch } from './ai-classifier.js';
+import { classifyProfilesBatch } from './ai-classifier.mjs';
 import { SHEETS_ID } from './config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
