@@ -198,9 +198,9 @@ async function run() {
                 addHashtag('#' + clean, `post:${shortcode}`);
             }
 
-            // Indonesian check via caption
-            const postText = ((postData.caption || '') + ' ' + (postData.hashtags || []).join(' ')).toLowerCase();
-            if (!isIndonesian(postText, [], '')) {
+            // Layer 3: desc = caption text from the post
+            const postText = (postData.caption || '') + ' ' + (postData.hashtags || []).join(' ');
+            if (!isIndonesian('', '', postText)) {
                 console.log(`  [SKIP] @${username} — not Indonesian`); continue;
             }
 
@@ -209,8 +209,8 @@ async function run() {
             if (!profile) { globalErrorCount++; continue; }
             globalErrorCount = 0;
 
-            // Profile Indonesian check
-            if (!isIndonesian(profile.bio || '', [...(profile.hashtags || [])], profile.nativeLocation || '')) {
+            // Profile Indonesian check (bio = Layer 2, no caption available here)
+            if (!isIndonesian(profile.displayName || '', profile.bio || '', '')) {
                 console.log(`  [SKIP] @${username} — profile not Indonesian`); continue;
             }
 
@@ -407,8 +407,8 @@ async function processDiscoveryQueue(existingUsernames) {
             continue;
         }
 
-        // Indonesian check
-        if (!isIndonesian(profile.bio || '', [...(profile.hashtags || [])], profile.nativeLocation || '')) {
+        // Indonesian check (bio = Layer 2)
+        if (!isIndonesian(profile.displayName || '', profile.bio || '', '')) {
             console.log(`  [SKIP] @${username} — not Indonesian`);
             markQueueDone(username);
             continue;
