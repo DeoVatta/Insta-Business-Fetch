@@ -140,9 +140,12 @@ async function enrichProfile(username, postData = null) {
                 if (feedPosts.length > 0) {
                     profile.feedPosts = feedPosts;
                     profile.engagementRate = calcEngagementFromPosts(feedPosts, profile.followers);
+                    // Most recent post URL for Last Post column
+                    profile.lastPostUrl = feedPosts[0].postUrl || '';
                     const avgLikes = (feedPosts.reduce((s, p) => s + (p.likeCount || 0), 0) / feedPosts.length).toFixed(0);
                     const avgComments = (feedPosts.reduce((s, p) => s + (p.commentCount || 0), 0) / feedPosts.length).toFixed(1);
                     console.log(`  [ENGAGEMENT FEED] ${feedPosts.length} posts avg | ${avgLikes} likes + ${avgComments} comments | ${profile.engagementRate}%`);
+                    console.log(`  [LAST POST] ${profile.lastPostUrl}`);
                 } else {
                     profile.engagementRate = profile.followers > 0 ? (((profile.postLikes + profile.postComments) / profile.followers) * 100).toFixed(2) : 0;
                 }

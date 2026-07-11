@@ -1058,9 +1058,42 @@ async function scrapeHashtags(hashtags) {
 
 // ============== USER FEED (for engagement calculation) ==============
 /**
- * Fetch a user's recent posts via Instagram REST API.
- * Returns: { items: [{ like_count, comment_count, taken_at }], next_max_id }
- * Used for accurate engagement rate calculation (avg likes+comments / followers).
+ * Dedicated mobile API call for fetchUserFeed.
+ * Uses igFetch's internal mobile header setup directly — igFetch(url, true)
+ * does NOT actually pass mobile headers, so we call igFetch + manually patch.
+ */
+async function fetchUserFeedMobile(url) {
+    await sleep(REQUEST_DELAY * 1000);
+    return new Promise((resolve) => {
+        loadCookies();
+        const u = new URL(url);
+        const headers = {
+            'User-Agent': 'Instagram 276.0.0.0.0 Android (Android/13; SDK 33; x86; Xiaomi Redmi Note 11)',
+            'Cookie': _cookieStr,
+            'X-CSRFToken': _csrftoken,
+            'X-IG-App-ID': '1217981644879628',
+            'X-IG-App-Locale': 'en_US',
+            'X-IG-Device-Locale': 'en_US',
+            'Accept': 'application/json, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.instagram.com/',
+        };
+        const opts = { hostname: u.hostname, path: u.pathname + u.search, headers };
+        const req = https.request(opts, res => {
+            let data = '';
+            res.on('data', c => data += c);
+            res.on('end', () => resolve({ status: res.statusCode, body: data }));
+        });
+        req.on('error', () => resolve({ status: 0, body: '' }));
+        req.setTimeout(15000, () => { req.destroy(); resolve({ status: 0, body: '' }); });
+        req.end();
+    });
+}
+
+/**
+ * Fetch a user's recent posts via Instagram REST API (mobile endpoint).
+ * Returns: { items: [{ likeCount, commentCount, takenAt, shortcode, postUrl }], nextMaxId }
+ * Used for accurate engagement rate calculation + last post URL.
  *
  * @param {string} username
  * @param {number} count - max posts to fetch (default 18, max ~50 with pagination)
@@ -1074,19 +1107,23 @@ async function fetchUserFeed(username, count = 18) {
             ? `https://i.instagram.com/api/v1/feed/user/${username}/username/?max_id=${nextMaxId}&count=18`
             : `https://i.instagram.com/api/v1/feed/user/${username}/username/?count=18`;
 
-        const res = await igFetch(url, true); // mobile headers
+        const res = await fetchUserFeedMobile(url);
         if (res.status !== 200) break;
 
         try {
             const data = JSON.parse(res.body);
             const items = data.items || [];
             if (items.length === 0) break;
-            posts.push(...items.map(item => ({
-                likeCount: item.like_count || 0,
-                commentCount: item.comment_count || 0,
-                takenAt: item.taken_at || 0,
-                shortcode: item.code || item.pk || '',
-            })));
+            posts.push(...items.map(item => {
+                const shortcode = item.code || '';
+                return {
+                    likeCount: item.like_count || 0,
+                    commentCount: item.comment_count || 0,
+                    takenAt: item.taken_at || 0,
+                    shortcode,
+                    postUrl: shortcode ? `https://www.instagram.com/p/${shortcode}/` : '',
+                };
+            }));
             nextMaxId = data.next_max_id || '';
             if (!nextMaxId) break;
         } catch (e) {
