@@ -11,6 +11,7 @@ import {
     enrichPostsBatch,
     scrapeProfilePosts,
     initBrowser,
+    fetchUserFeed,
 } from './scraper.js';
 import { classifyAccount, classifyFromHashtags, detectCategory, detectLocation, calculateEngagement } from './classifier.js';
 import { REQUEST_DELAY, PROFILES_PER_HASHTAG } from './config.js';
@@ -53,11 +54,25 @@ async function enrichProfilesBatch(posts, maxProfiles, concurrency = 2, batchDel
 
 // ============== ENRICH PROFILE ==============
 /**
+ * Calculate engagement rate from an array of post stats.
+ * Formula: (avg_likes + avg_comments) / followers * 100
+ * Uses UpDog method: average engagement per post / followers.
+ */
+function calcEngagementFromPosts(posts, followers) {
+    if (!followers || followers === 0 || !posts || posts.length === 0) return 0;
+    const totalLikes = posts.reduce((sum, p) => sum + (p.likeCount || 0), 0);
+    const totalComments = posts.reduce((sum, p) => sum + (p.commentCount || 0), 0);
+    const avgEngagement = (totalLikes + totalComments) / posts.length;
+    return parseFloat(((avgEngagement / followers) * 100).toFixed(2));
+}
+
+/**
  * Full profile enrichment:
  * 1. Get profile data from profile page (bio, followers, following, posts, category)
  * 2. Scrape recent posts from profile grid (for collab/mention discovery)
- * 3. Classify: competitor/vendor/client
- * 4. Calculate engagement
+ * 3. Fetch user feed via REST API (for accurate engagement rate)
+ * 4. Classify: competitor/vendor/client
+ * 5. Calculate engagement from aggregated post stats (UpDog method)
  */
 async function enrichProfile(username, postData = null) {
     try {
@@ -94,16 +109,51 @@ async function enrichProfile(username, postData = null) {
             profile.profilePostUrls = profilePostUrls;
 
             // Enrich posts in parallel batches (3 concurrent, 2s between batches)
+            // Collect all likes/comments for engagement calculation
             if (profilePostUrls.length > 0) {
                 const enrichedPosts = await enrichPostsBatch(profilePostUrls.slice(0, 6), 3, 2000);
                 for (const pd of enrichedPosts) {
                     pd.hashtags.forEach(h => profile.hashtags.add(h));
                     pd.mentions.forEach(m => profile.mentions.add(m));
                     pd.collabs.forEach(c => profile.collabs.add(c));
+                    // Aggregate likes/comments from each post
+                    profile.postLikes += pd.likes || 0;
+                    profile.postComments += pd.comments || 0;
                 }
             }
         } catch (e) {
             console.log(`  [WARN] Could not scrape profile posts @${username}: ${e.message}`);
+        }
+
+        // Fetch user feed via REST API for accurate engagement rate
+        // This gives us like_count + comment_count for each recent post
+        if (profile.followers > 0) {
+            try {
+                const feedPosts = await fetchUserFeed(username, 18);
+                if (feedPosts.length > 0) {
+                    profile.feedPosts = feedPosts;
+                    profile.engagementRate = calcEngagementFromPosts(feedPosts, profile.followers);
+                    const avgLikes = (feedPosts.reduce((s, p) => s + (p.likeCount || 0), 0) / feedPosts.length).toFixed(0);
+                    const avgComments = (feedPosts.reduce((s, p) => s + (p.commentCount || 0), 0) / feedPosts.length).toFixed(1);
+                    console.log(`  [ENGAGEMENT FEED] ${feedPosts.length} posts avg | ${avgLikes} likes + ${avgComments} comments | ${profile.engagementRate}%`);
+                } else {
+                    // Fallback to aggregated single-post engagement
+                    profile.engagementRate = calculateEngagement(
+                        profile.postLikes,
+                        profile.postComments,
+                        profile.followers
+                    );
+                }
+            } catch (e) {
+                console.log(`  [WARN] Could not fetch user feed @${username}: ${e.message}`);
+                profile.engagementRate = calculateEngagement(
+                    profile.postLikes,
+                    profile.postComments,
+                    profile.followers
+                );
+            }
+        } else {
+            profile.engagementRate = 0;
         }
 
         // Classify
@@ -111,17 +161,6 @@ async function enrichProfile(username, postData = null) {
         profile.type = classifyAccount(profile.bio || '', profile.displayName || '');
         profile.location = detectLocation(profile.bio || '', profile.displayName || '', profile.nativeLocation || '');
         profile.category = detectCategory(profile.bio || '', profile.displayName || '', profile.type);
-
-        // Engagement (use post likes/comments as proxy, or from profile data)
-        if (profile.followers > 0) {
-            profile.engagementRate = calculateEngagement(
-                profile.postLikes,
-                profile.postComments,
-                profile.followers
-            );
-        } else {
-            profile.engagementRate = 0;
-        }
 
         // If bio is empty OR type is still client, try classify from hashtags
         const hasBio = (profile.bio || '').trim().length > 5;
@@ -131,7 +170,7 @@ async function enrichProfile(username, postData = null) {
         }
 
         console.log(`  [CLASSIFY] ${profile.type} | ${profile.category} | ${profile.location || 'N/A'}`);
-        console.log(`  [ENGAGEMENT] ${profile.engagementRate}% (${profile.postLikes} likes, ${profile.postComments} comments / ${profile.followers} followers)`);
+        console.log(`  [ENGAGEMENT] ${profile.engagementRate}% (${profile.followers} followers)`);
         console.log(`  [TAGS] Hashtags: ${[...profile.hashtags].slice(0, 5).join(' ')}`);
         console.log(`  [DISC] Mentions: ${[...profile.mentions].slice(0, 3).join(', ') || 'none'}`);
         console.log(`  [DISC] Collabs: ${[...profile.collabs].slice(0, 3).join(', ') || 'none'}`);

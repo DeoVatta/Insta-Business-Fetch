@@ -228,7 +228,9 @@ function profileToRow(profile) {
     const website = profile.website || extractWebsite(bio);
 
     let analyticsStr;
-    if (profile.analytics) {
+    if (profile.engagementRate !== undefined && profile.engagementRate !== null) {
+        analyticsStr = `${profile.engagementRate}%`;
+    } else if (profile.analytics) {
         analyticsStr = typeof profile.analytics === 'string' ? profile.analytics : `${profile.analytics}%`;
     } else if (profile.followers && profile.followers > 0) {
         const rate = (((profile.postLikes || 0) + (profile.postComments || 0)) / profile.followers * 100).toFixed(2);

@@ -226,7 +226,20 @@ Profiles are buffered in memory and flushed to Google Sheets every 10 profiles O
 | Profiles per 5hrs | ~450 |
 | Profiles/week | ~3,000+ |
 
-AI extracts: Category, Location (city), WhatsApp, Website, Engagement rate.
+AI extracts: Category, Location (city), WhatsApp, Website. **Engagement rate** is calculated locally from the Instagram REST feed API (UpDog method: average likes+comments per post / followers).
+
+## Engagement Rate Calculation
+
+Formula: `(avg_likes_per_post + avg_comments_per_post) / followers * 100`
+
+Data source: `/api/v1/feed/user/{username}/username/` — authenticated REST endpoint via session cookies.
+
+- Fetches up to 18 recent posts
+- Calculates average likes + average comments across all fetched posts
+- Divides by follower count and multiplies by 100
+- Result written to column K (Analytics) as percentage, e.g. `4.23%`
+
+Fallback: If feed API fails, uses aggregated engagement from individual enriched posts (6 posts per profile).
 
 ## Known Issues
 

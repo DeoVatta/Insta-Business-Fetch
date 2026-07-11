@@ -960,6 +960,47 @@ async function scrapeHashtags(hashtags) {
     return allPosts;
 }
 
+// ============== USER FEED (for engagement calculation) ==============
+/**
+ * Fetch a user's recent posts via Instagram REST API.
+ * Returns: { items: [{ like_count, comment_count, taken_at }], next_max_id }
+ * Used for accurate engagement rate calculation (avg likes+comments / followers).
+ *
+ * @param {string} username
+ * @param {number} count - max posts to fetch (default 18, max ~50 with pagination)
+ */
+async function fetchUserFeed(username, count = 18) {
+    const posts = [];
+    let nextMaxId = '';
+
+    while (posts.length < count) {
+        const url = nextMaxId
+            ? `https://i.instagram.com/api/v1/feed/user/${username}/username/?max_id=${nextMaxId}&count=18`
+            : `https://i.instagram.com/api/v1/feed/user/${username}/username/?count=18`;
+
+        const res = await igFetch(url, true); // mobile headers
+        if (res.status !== 200) break;
+
+        try {
+            const data = JSON.parse(res.body);
+            const items = data.items || [];
+            if (items.length === 0) break;
+            posts.push(...items.map(item => ({
+                likeCount: item.like_count || 0,
+                commentCount: item.comment_count || 0,
+                takenAt: item.taken_at || 0,
+                shortcode: item.code || item.pk || '',
+            })));
+            nextMaxId = data.next_max_id || '';
+            if (!nextMaxId) break;
+        } catch (e) {
+            break;
+        }
+    }
+
+    return posts.slice(0, count);
+}
+
 // ============== EXPORTS ==============
 export {
     initBrowser,
@@ -975,4 +1016,5 @@ export {
     decodeShortcode,
     fetchAllPostCommentsGraphQL,
     fetchPostCommentsGraphQL,
+    fetchUserFeed,
 };
