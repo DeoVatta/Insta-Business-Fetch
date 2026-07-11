@@ -430,7 +430,7 @@ process.on('SIGINT', async () => {
     await flushProfileRows();
     await forceSave();
     printStats();
-    await closeBrowser().catch(() => {});
+    // Don't close browser — PM2 handles cleanup; closing here kills in-flight enrichment
     process.exit(1);
 });
 

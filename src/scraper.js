@@ -21,10 +21,12 @@ import { ensureAuth } from './instagram-auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Safe waitForTimeout wrapper — never throws
+// Safe wait — always resolves (never throws), returns early if page is gone
 async function safeWait(ms) {
-    if (!_page) return;
-    try { await _page.waitForTimeout(ms); } catch (_) {}
+    try {
+        if (!_page || _page.isClosed()) return;
+        await _page.waitForTimeout(ms);
+    } catch (_) {}
 }
 
 // ============== SHORTCODE → MEDIA ID ==============
