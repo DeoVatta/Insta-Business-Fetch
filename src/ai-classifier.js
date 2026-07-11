@@ -165,16 +165,39 @@ const SYSTEM_PROMPT = `You are a data extraction assistant for Indonesian busine
 Analyze the profile data and extract business information. Return a JSON array ONLY -- no thinking, no explanation, no markdown, no text outside the JSON.
 
 Each entry:
-{"u":"username","c":"category","l":"location","w":"whatsapp","e":"website","eng":"engagement_rate_percent","note":"1-line-summary"}
+{"u":"username","c":"category","l":"location","w":"whatsapp","e":"website","eng":"engagement_rate_percent","i":true_or_false,"note":"1-line-summary"}
 
 Rules:
-- c (category): Determine the actual business category based on bio, display name, captions, and hashtags. Examples: "Fashion / Clothing", "Makanan & Minuman", "Beauty / Kosmetik", "Kesehatan / Suplemen", "Elektronik", "Rumah Tangga", "Hewan Peliharaan", "Anak-anak", "Pendidikan", "Jasa / Layanan", "Online Shop", "Pertanian", "Otomotif", "Fotografi", "Kecantikan", "Fashion Muslimah", "Fnb", "Minuman", "Makanan", "Travel", "Properti", dll. Use Indonesian. Be SPECIFIC to what the account actually sells/offers. NEVER use "Other" unless truly unclassifiable.
-- l (location): ONLY city name in Indonesian (e.g. "Semarang", "Yogyakarta", "Surabaya", "Jakarta"). NOT province. NOT country. If unclear, infer from username/bio or use empty string.
-- w (whatsapp): Extract phone number from bio. Format: 08xx... or +62... with no spaces/dashes. Empty string if not found.
-- e (website): Extract website URL from bio. Empty string if not found.
-- eng: Calculate engagement rate as: (likes + comments) / followers * 100. If followers unknown or 0, return "N/A". Format: "X.XX%".
-- note: One sentence about this business in Indonesian describing what they sell/offer (max 100 chars).
-- Match output username (u) exactly as input. Return ALL profiles in the batch. Do NOT skip any profile.`;
+- u: Match exactly as input username.
+- c (category): SPECIFIC business category based on bio, display name, captions, and hashtags. Examples:
+  * "Akuntansi / Pajak" -- akuntan, konsultan pajak, pembukuan, SPT
+  * "Consulting / Konsultan" -- bisnis konsultan umum, manajemen, legal
+  * "Fashion / Clothing" -- apparel, distro, sneakers, shoes, tas
+  * "Fashion Muslimah" -- hijab, mukena, gamis, busana muslim
+  * "Makanan & Minuman" -- F&B, kuliner, warung, cafe, restaurant, catering food
+  * "Minuman" -- kopi, teh, jus, minuman bottled/粉末
+  * "Kecantikan" -- skincare, kosmetik, parfum, beauty products
+  * "Kesehatan / Suplemen" -- obat, suplemen, vitamin, produk kesehatan
+  * "Elektronik / Gadget" -- HP, laptop, komputer, aksesoris elektronik
+  * "Pendidikan / Kursus" -- les, bimbingan belajar, kursus, sekolah
+  * "Fotografi / Videografi" -- fotografer, videografer, editor
+  * "Dekorasi / Event" -- dekorasi, organizer event, MC
+  * "Properti / Interior" -- property agent, interior design, furniture
+  * "Travel / Tourism" -- travel agent, tour, homestay, hotel
+  * "Otomotif" -- bengkel, spare part, modifikasi kendaraan
+  * "Pets / Hewan" -- pet shop, grooming, klinik hewan
+  * "Pertanian" -- bibit, pupuk, alat pertanian
+  * "Online Shop" -- general e-commerce, reseller, dropshipper
+  * "Jasa / Layanan" -- ONLY if truly generic/unknown. Try to be specific first.
+  Use Indonesian. Be SPECIFIC. NEVER default to "Jasa / Layanan" or "Other".
+- l (location): City name in Indonesian (Jakarta, Semarang, Yogyakarta, Surabaya, Bandung). NOT province/country. Infer from username/bio or empty string.
+- w (whatsapp): Phone from bio. Format: 08xx... or +62... no spaces. Empty if not found.
+- e (website): URL from bio. Empty if not found.
+- eng: (likes + comments) / followers * 100. Format: "X.XX%". "N/A" if followers unknown or 0.
+- i (isIndonesian): TRUE if the profile/content appears to be Indonesian. Consider: bio language (Indonesian words: yang, dan, di, dengan, untuk, ini, itu, ada, etc.), location in Indonesia, Indonesian currency mentions (RP, rupiah), +62 phone, city names. FALSE if clearly foreign (English-only bio, foreign location, no Indonesian indicators).
+- note: 1 sentence about this business in Indonesian describing what they sell/offer (max 100 chars).
+
+Return ALL profiles in the batch. Do NOT skip any.`;
 
 const USER_PROMPT_PREFIX = 'Extract from this batch:\n';
 
@@ -203,9 +226,7 @@ function parseAiResponse(text, profileCount) {
 
 /**
  * Classify a batch of profiles via AI.
- * @param {Array} profiles -- enriched profile objects
- * @param {number} concurrency -- not used (sequential per batch)
- * @returns {Array} -- profiles with AI fields merged: category, location, whatsapp, website, analytics, aiNote
+ * AI output includes isIndonesian flag -- non-Indonesian profiles are skipped by sheets.js.
  */
 export async function classifyProfilesBatch(profiles, concurrency = 1) {
     if (!profiles || profiles.length === 0) return [];
@@ -229,17 +250,25 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
 
         console.log(`[AI] Batch ${batchNum}/${batches.length}: ${batch.length} profiles...`);
 
-        const input = batch.map(p => ({
-            u: p.username || '',
-            n: p.displayName || '',
-            b: ((p.bio || '') + ' ' + (p.caption || '')).slice(0, 500),
-            f: p.followers || 0,
-            lks: p.postLikes || 0,
-            cms: p.postComments || 0,
-            h: [...(p.hashtags || [])].slice(0, 10).join(' '),
-            loc: p.nativeLocation || p.location || '',
-            caps: [p.caption || ''].filter(Boolean).slice(0, 3).join(' | '),
-        }));
+        // Build AI input -- include ALL captions from feedPosts for full context
+        const input = batch.map(p => {
+            const feedCaps = (p.feedPosts || [])
+                .filter(fp => fp.postUrl)
+                .slice(0, 6)
+                .map(fp => fp.postUrl);
+            const allCaps = [p.caption || ''].concat(feedCaps).filter(Boolean).join(' || ');
+            return {
+                u: p.username || '',
+                n: p.displayName || '',
+                b: ((p.bio || '') + ' ' + (p.caption || '')).slice(0, 600),
+                f: p.followers || 0,
+                lks: p.postLikes || 0,
+                cms: p.postComments || 0,
+                h: [...(p.hashtags || [])].slice(0, 15).join(' '),
+                loc: p.nativeLocation || p.location || '',
+                caps: allCaps.slice(0, 400),
+            };
+        });
 
         const messages = [{ role: 'user', content: USER_PROMPT_PREFIX + JSON.stringify(input) }];
 
@@ -249,7 +278,7 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
 
             if (parsed && parsed.length > 0) {
                 const first = parsed[0];
-                console.log(`  [AI DEBUG] @${first.u} --> category="${first.c}", location="${first.l}", wa="${first.w}", eng="${first.eng}"`);
+                console.log(`  [AI DEBUG] @${first.u} --> category="${first.c}", location="${first.l}", wa="${first.w}", eng="${first.eng}", indonesian=${first.i}`);
             }
 
             const lookup = {};
@@ -268,6 +297,7 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
                 const aiWebsite = ai.e || extractWebsite(profile.bio || '');
                 const aiEngagement = ai.eng || 'N/A';
                 const aiNote = ai.note || '';
+                const isIndonesian = ai.i === true;
 
                 results.push({
                     ...profile,
@@ -278,6 +308,7 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
                     analytics: aiEngagement,
                     aiNote,
                     aiBatch: batchNum,
+                    isIndonesian,
                 });
             }
 
