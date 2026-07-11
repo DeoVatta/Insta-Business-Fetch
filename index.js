@@ -71,20 +71,34 @@ async function run() {
     // Get pending hashtags from sheet
     const pendingHashtags = await readHashtags();
 
-    // Check which hashtags are already done in state
+    // Build available list from sheet
     const doneInState = new Set(
         Object.entries(state.hashtags)
             .filter(([, v]) => v.status === 'Executed')
             .map(([k]) => k)
     );
+
     let availableHashtags = pendingHashtags.filter(h => {
         const clean = h.replace(/^#/, '').toLowerCase().trim();
         return !doneInState.has(clean);
     });
 
-    // If no available hashtags: check if sheet has any hashtags at all
+    // If no available hashtags from sheet, try fallback to state.json hashtags
     if (availableHashtags.length === 0) {
-        // Read all hashtags (including Executed) to check status
+        const stateHashtags = Object.keys(state.hashtags);
+        if (stateHashtags.length > 0) {
+            // Use state.json hashtags that are NOT Executed
+            const statePending = stateHashtags.filter(tag => {
+                const s = state.hashtags[tag];
+                return s.status !== 'Executed';
+            });
+            availableHashtags = statePending.map(t => '#' + t);
+            console.log(`[STATE] Loaded ${availableHashtags.length} hashtags from state file (fallback)`);
+        }
+    }
+
+    // If still no available hashtags: check if sheet has any at all
+    if (availableHashtags.length === 0) {
         const allHashtagsRaw = await readHashtagsWithStatus();
         const allTags = allHashtagsRaw.map(r => r.tag);
 
@@ -92,15 +106,34 @@ async function run() {
             // Sheet has hashtags but all Executed → reset to Pending
             console.log('[INFO] All hashtags executed — resetting sheet statuses to Pending...');
             await resetHashtagStatuses();
-            // Reload pending — sheet now has Pending statuses
             const reloaded = await readHashtags();
             availableHashtags = reloaded;
             console.log('[INFO] Reset complete — processing hashtags.');
         }
 
+        // If still nothing, check state.json — if all Executed, clear and start fresh
         if (availableHashtags.length === 0) {
-            console.log('[ERROR] No pending hashtags in Hashtags sheet. Add hashtags with status=Pending.');
-            process.exit(1);
+            const stateHashtags = Object.entries(state.hashtags);
+            const allExecuted = stateHashtags.length > 0 && stateHashtags.every(([, v]) => v.status === 'Executed');
+            if (allExecuted) {
+                console.log('[INFO] All state hashtags executed — clearing state and starting fresh...');
+                const { loadState: reloadState } = await import('./src/state.js');
+                // Reset all hashtag statuses in state
+                const fs = await import('fs');
+                const statePath = './discovery-state.json';
+                const raw = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+                for (const tag of Object.keys(raw.hashtags)) {
+                    raw.hashtags[tag].status = 'Pending';
+                }
+                fs.writeFileSync(statePath, JSON.stringify(raw, null, 2));
+                await reloadState();
+                const fresh = Object.keys(getState().hashtags).filter(t => getState().hashtags[t].status !== 'Executed');
+                availableHashtags = fresh.map(t => '#' + t);
+                console.log(`[INFO] State reset — ${availableHashtags.length} hashtags ready.`);
+            } else {
+                console.log('[ERROR] No pending hashtags found anywhere. Add hashtags with status=Pending to sheet, or clear state.');
+                process.exit(1);
+            }
         }
     }
 

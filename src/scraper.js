@@ -626,13 +626,33 @@ async function enrichPostsBatch(urls) {
     return all.filter(Boolean);
 }
 
+// ============== TIMEOUT WRAPPER
+async function withTimeout(promise, ms, label = 'operation') {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`[TIMEOUT] ${label} exceeded ${ms}ms`)), ms);
+        promise.then(v => { clearTimeout(timer); resolve(v); })
+                .catch(e => { clearTimeout(timer); reject(e); });
+    });
+}
+
 // ============== PROFILE ENRICHMENT
 async function enrichProfileFromPage(username) {
     if (!_page) await initBrowser();
     await sleep(REQUEST_DELAY * 1000);
 
     const profileUrl = `https://www.instagram.com/${username}/`;
-    await _page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    try {
+        await withTimeout(
+            _page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }),
+            40000,
+            `navigate @${username}`
+        );
+    } catch (e) {
+        console.log(`  [PROFILE TIMEOUT] @${username} — ${e.message}`);
+        return buildFallbackProfile(username);
+    }
+
     await _page.waitForTimeout(3000);
 
     const bodyLen = await _page.evaluate(() => document.body.innerHTML.length);
@@ -710,6 +730,42 @@ async function enrichProfileFromPage(username) {
     const waMatch = bodyText.match(/(wa\.me\/[\d]+|whatsapp\.com\/[\w]+\/[\d]+|\+62[\d\s-]+)/i);
     if (waMatch) waLink = waMatch[0];
 
+    // Website from link-in-bio
+    let website = '';
+    try {
+        const websiteEl = await _page.evaluate(() => {
+            // Direct link-in-bio section (new Instagram layout)
+            const linkSection = document.querySelector('section a[href*="linktr.ee"], section a[href*="beacons.ai"], section a[href*="carrd.co"], section a[href*="linkbio"], section a[href*="biolink"], section a[href*="lnk.to"], section a[href*="solo.to"]');
+            if (linkSection) return linkSection.getAttribute('href') || '';
+
+            // Footer link-in-bio div
+            const footerLink = document.querySelector('a[href*="linktr.ee"], a[href*="beacons.ai"], a[href*="carrd.co"], a[href*="linkbio"], a[href*="biolink"], a[href*="lnk.to"], a[href*="solo.to"], a[href*="taplink"], a[href*="linkstack"]');
+            if (footerLink) return footerLink.getAttribute('href') || '';
+
+            // Generic "website" link in bio section
+            const siteLinks = document.querySelectorAll('a[href^="http"]');
+            for (const el of siteLinks) {
+                const href = el.getAttribute('href') || '';
+                const text = (el.textContent || '').toLowerCase();
+                // Skip Instagram/TikTok/mail links
+                if (/instagram\.com|tiktok\.com|mailto:|facebook\.com|twitter\.com|x\.com/.test(href)) continue;
+                // Include linktree-like or actual websites
+                if (href.includes('linktr.ee') || href.includes('beacons.') || href.includes('carrd.') ||
+                    href.includes('linkbio') || href.includes('biolink') || href.includes('lnk.to') ||
+                    href.includes('solo.to') || href.includes('taplink') || href.includes('linkstack') ||
+                    href.includes('link.me') || href.includes('about.me') || href.includes('link in bio')) {
+                    return href;
+                }
+                // Accept any external URL in the bio link section (not just known platforms)
+                if (href.startsWith('http') && !href.includes('instagram.com') && text.length > 2 && text.length < 60) {
+                    return href;
+                }
+            }
+            return '';
+        });
+        if (websiteEl) website = websiteEl;
+    } catch { /* ignore */ }
+
     return {
         username,
         displayName,
@@ -722,6 +778,7 @@ async function enrichProfileFromPage(username) {
         profileUrl: `https://www.instagram.com/${username}/`,
         ogImage,
         waLink,
+        website,
     };
 }
 
@@ -782,11 +839,15 @@ function buildFallbackProfile(username) {
 async function scrapeHashtag(hashtag, maxPosts = 200) {
     if (!_page) await initBrowser();
 
-    console.log(`[HASHTAG] #${hashtag}`);
+    console.log(`[HASHTAG] ${hashtag}`);
     const cleanTag = hashtag.replace(/^#/, '');
     const searchUrl = `https://www.instagram.com/explore/tags/${encodeURIComponent(cleanTag)}/`;
 
-    await _page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 40000 });
+    await withTimeout(
+        _page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 40000 }),
+        50000,
+        `hashtag #${cleanTag}`
+    );
 
     // Wait for posts to render — use img inside post links (more reliable than article selector)
     try {
@@ -796,70 +857,80 @@ async function scrapeHashtag(hashtag, maxPosts = 200) {
     }
     await _page.waitForTimeout(3000);
 
-    // Scroll to load more posts
-    let prevCount = 0;
-    let consecutiveEmpty = 0;
-    let scrollCount = 0;
-    let selector = 'article a[href*="/p/"]'; // try article-first
-    const maxScrolls = MAX_SCROLL_HASHTAG || 50;
+    // Wrap entire scroll loop with 3-minute timeout
+    try {
+        await withTimeout((async () => {
+            // Scroll to load more posts
+            let prevCount = 0;
+            let consecutiveEmpty = 0;
+            let scrollCount = 0;
+            let selector = 'article a[href*="/p/"]'; // try article-first
+            const maxScrolls = MAX_SCROLL_HASHTAG || 50;
 
-    while (scrollCount < maxScrolls) {
-        // Try article selector first, fall back to broader selector
-        let urls = await _page.$$eval(selector,
-            els => [...new Set(els.map(e => e.href.split('?')[0]))]);
+            while (scrollCount < maxScrolls) {
+                // Try article selector first, fall back to broader selector
+                let urls = await _page.$$eval(selector,
+                    els => [...new Set(els.map(e => e.href.split('?')[0]))]);
 
-        // Fallback: if article selector finds nothing, use broader selector
-        if (urls.length === 0) {
-            urls = await _page.evaluate(() => {
-                const links = Array.from(document.querySelectorAll('a[href*="/p/"]'));
-                return [...new Set(links.map(l => l.href.split('?')[0]))];
-            });
-        }
+                // Fallback: if article selector finds nothing, use broader selector
+                if (urls.length === 0) {
+                    urls = await _page.evaluate(() => {
+                        const links = Array.from(document.querySelectorAll('a[href*="/p/"]'));
+                        return [...new Set(links.map(l => l.href.split('?')[0]))];
+                    });
+                }
 
-        const currentCount = urls.length;
+                const currentCount = urls.length;
 
-        // Stop after 8 consecutive scrolls with no new posts (truly exhausted)
-        if (currentCount > 0 && currentCount === prevCount) {
-            consecutiveEmpty++;
-            if (consecutiveEmpty >= 8) {
-                console.log(`  [SCROLL] No new posts for 8 scrolls — stopping at ${currentCount}`);
-                break;
+                // Stop after 8 consecutive scrolls with no new posts (truly exhausted)
+                if (currentCount > 0 && currentCount === prevCount) {
+                    consecutiveEmpty++;
+                    if (consecutiveEmpty >= 8) {
+                        console.log(`  [SCROLL] No new posts for 8 scrolls — stopping at ${currentCount}`);
+                        break;
+                    }
+                } else {
+                    consecutiveEmpty = 0;
+                }
+
+                // Stop if stuck at 0 posts for too long
+                if (currentCount === 0 && scrollCount > 10) {
+                    console.log(`  [SCROLL] 0 posts after ${scrollCount} scrolls — stopping`);
+                    break;
+                }
+
+                prevCount = currentCount;
+                // Scroll to bottom — triggers lazy loading on hashtag page
+                await _page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+                await _page.waitForTimeout(2000);
+
+                // Wait for new images to load after scroll
+                try {
+                    await _page.waitForSelector('a[href*="/p/"] img', { timeout: 8000 });
+                } catch (_) { /* no new images, continue scrolling */ }
+
+                scrollCount++;
             }
-        } else {
-            consecutiveEmpty = 0;
-        }
 
-        // Stop if stuck at 0 posts for too long
-        if (currentCount === 0 && scrollCount > 10) {
-            console.log(`  [SCROLL] 0 posts after ${scrollCount} scrolls — stopping`);
-            break;
-        }
+            // Extract final post URLs — try article first, then broader
+            let postUrls = await _page.$$eval('article a[href*="/p/"]',
+                els => [...new Set(els.map(e => e.href.split('?')[0]))]);
+            if (postUrls.length === 0) {
+                postUrls = await _page.evaluate(() => {
+                    const links = Array.from(document.querySelectorAll('a[href*="/p/"]'));
+                    return [...new Set(links.map(l => l.href.split('?')[0]))];
+                });
+            }
 
-        prevCount = currentCount;
-        // Scroll to bottom — triggers lazy loading on hashtag page
-        await _page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await _page.waitForTimeout(2000);
-
-        // Wait for new images to load after scroll
-        try {
-            await _page.waitForSelector('a[href*="/p/"] img', { timeout: 8000 });
-        } catch (_) { /* no new images, continue scrolling */ }
-
-        scrollCount++;
+            console.log(`  Found ${postUrls.length} post URLs (${scrollCount} scrolls)`);
+            return postUrls;
+        })(), 180000, 'scroll-loop');
+    } catch (e) {
+        console.log(`  [SCROLL TIMEOUT] ${e.message} — returning empty`);
+        return [];
     }
 
-    // Extract final post URLs — try article first, then broader
-    let postUrls = await _page.$$eval('article a[href*="/p/"]',
-        els => [...new Set(els.map(e => e.href.split('?')[0]))]);
-    if (postUrls.length === 0) {
-        postUrls = await _page.evaluate(() => {
-            const links = Array.from(document.querySelectorAll('a[href*="/p/"]'));
-            return [...new Set(links.map(l => l.href.split('?')[0]))];
-        });
-    }
-
-    console.log(`  Found ${postUrls.length} post URLs (${scrollCount} scrolls)`);
-    if (postUrls.length === 0) return [];
+    if (!postUrls || postUrls.length === 0) return [];
 
     // Enrich all post URLs with oEmbed (parallel, ~2000 posts/min, public API)
     console.log(`  Enriching ${postUrls.length} posts via oEmbed...`);
