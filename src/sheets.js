@@ -36,8 +36,8 @@ let sheetInitialized = false;
 // Batch write buffer to avoid per-row API calls (60 writes/min limit)
 let _profileBuffer = []; // stores raw profile objects for AI batch
 let _flushTimer = null;
-const BATCH_SIZE = 10; // flush every N profiles
-const BATCH_FLUSH_MS = 30000; // or every 30s
+const BATCH_SIZE = 20; // flush every N profiles (reduce Sheets quota pressure)
+const BATCH_FLUSH_MS = 60000; // or every 60s
 
 async function initSheets() {
     if (sheetsClient && sheetInitialized) return sheetsClient;
