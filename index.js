@@ -20,15 +20,14 @@
 
 import {
     initBrowser, closeBrowser, refreshCookieStr,
-    enrichPost, scrapeHashtag, fetchAllPostCommentsGraphQL,
+    enrichPost, scrapeHashtag,
 } from './src/scraper.js';
 import { enrichProfile } from './src/enricher.js';
-import { filterClients } from './src/comments.js';
-import { classifyProfilesBatch, classifyHashtagsBatch } from './src/ai-classifier.js';
+import { classifyHashtagsBatch } from './src/ai-classifier.js';
 import {
     initSheets, readHashtags, readHashtagsWithStatus, readHashtagsInSheet, readVisitedProfiles,
     writeHashtagBatch, markHashtagStatus, resetHashtagStatuses,
-    writeProfile, writeClientFromComment, flushProfileRows,
+    writeProfile, flushProfileRows,
 } from './src/sheets.js';
 import { isIndonesian } from './src/classifier.js';
 import { MAX_API_ERRORS_CONSECUTIVE, REQUEST_DELAY } from './src/config.js';
@@ -222,31 +221,14 @@ async function run() {
                 await enrichAndNestedDiscover(username, profile, 1, shortcode, existingUsernames);
             }
 
+            // Write enriched profile to sheets
+            await writeProfile(profile, existingUsernames);
+            incStats('profiles');
+
             // Collect mentions + collabs from caption → add to queue (depth 2)
             for (const m of [...(postData.mentions || []), ...(postData.collabs || [])]) {
                 const mLower = m.toLowerCase();
                 addToQueue(mLower, 2, username);
-            }
-
-            // PHASE 5: Comment extraction for last 10 posts
-            const allComments = await fetchAllPostCommentsGraphQL(shortcode, 100);
-            if (allComments?.length) {
-                const clients = filterClients(allComments, username);
-                for (const client of clients) {
-                    const cUser = client.username.toLowerCase();
-                    if (isVisited(cUser)) continue;
-                    const clientData = {
-                        username: cUser,
-                        via: 'comment',
-                        source: hashtag,
-                        commentText: (client.text || '').slice(0, 200),
-                        location: '',
-                        profileUrl: `https://instagram.com/${cUser}/`,
-                    };
-                    await writeClientFromComment(clientData, existingUsernames);
-                    incStats('clients');
-                    markVisited(cUser, 0);
-                }
             }
 
             postCount++;
@@ -358,29 +340,6 @@ async function enrichAndNestedDiscover(username, profile, depth, sourcePost, exi
             for (const m of allMentions) {
                 const mLower = m.toLowerCase();
                 addToQueue(mLower, depth + 1, username);
-            }
-
-            // Comment extraction (only for depth 1, skip for depth 2+ to save time)
-            if (depth === 1) {
-                const allComments = await fetchAllPostCommentsGraphQL(shortcode, 100);
-                if (allComments?.length) {
-                    const clients = filterClients(allComments, username);
-                    for (const client of clients) {
-                        const cUser = client.username.toLowerCase();
-                        if (isVisited(cUser)) continue;
-                        const clientData = {
-                            username: cUser,
-                            via: 'comment',
-                            source: `${username}:${shortcode}`,
-                            commentText: (client.text || '').slice(0, 200),
-                            location: '',
-                            profileUrl: `https://instagram.com/${cUser}/`,
-                        };
-                        await writeClientFromComment(clientData, existingUsernames);
-                        incStats('clients');
-                        markVisited(cUser, 0);
-                    }
-                }
             }
 
             await sleep(REQUEST_DELAY * 1000);
