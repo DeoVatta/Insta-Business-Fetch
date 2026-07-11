@@ -21,6 +21,12 @@ import { ensureAuth } from './instagram-auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Safe waitForTimeout wrapper — never throws
+async function safeWait(ms) {
+    if (!_page) return;
+    try { await _page.waitForTimeout(ms); } catch (_) {}
+}
+
 // ============== SHORTCODE → MEDIA ID ==============
 function decodeShortcode(shortcode) {
     const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
@@ -251,7 +257,7 @@ async function initBrowser() {
 
     // Establish session
     await _page.goto('https://www.instagram.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await _page.waitForTimeout(2000);
+    await safeWait(2000);
     // Capture all cookies (including Instagram-set ones) so HTTP API calls work
     await refreshCookieStr();
     console.log('[BROWSER] Session ready, URL:', _page.url().substring(0, 50));
@@ -458,7 +464,7 @@ async function enrichPostFromBrowser(postUrl) {
             return null;
         }
     }
-    await _page.waitForTimeout(3000);
+    await safeWait(3000);
 
     const bodyLen = await _page.evaluate(() => document.body.innerHTML.length);
     if (bodyLen < 200) {
@@ -665,7 +671,7 @@ async function enrichProfileFromPage(username) {
         }
     };
 
-    await _page.waitForTimeout(3000);
+    await safeWait(3000);
 
     const bodyLen = await safeEvaluate(() => document.body.innerHTML.length);
     if (bodyLen === null || bodyLen < 100) {
@@ -801,7 +807,7 @@ async function scrapeProfilePosts(username, maxPosts = 20) {
 
     const profileUrl = `https://www.instagram.com/${username}/`;
     await _page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await _page.waitForTimeout(2000);
+    await safeWait(2000);
 
     // Scroll to load posts
     let prevCount = 0;
@@ -818,7 +824,7 @@ async function scrapeProfilePosts(username, maxPosts = 20) {
 
         prevCount = currentCount;
         await _page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await _page.waitForTimeout(1500);
+        await safeWait(1500);
         scrollCount++;
     }
 
@@ -871,7 +877,7 @@ async function scrapeHashtag(hashtag, maxPosts = 200) {
     } catch (e) {
         console.log(`  [WARN] No posts appeared — page may be blocked`);
     }
-    await _page.waitForTimeout(3000);
+    await safeWait(3000);
 
     // Wrap entire scroll loop with 3-minute timeout
     let postUrls = [];
@@ -919,7 +925,7 @@ async function scrapeHashtag(hashtag, maxPosts = 200) {
                 prevCount = currentCount;
                 // Scroll to bottom — triggers lazy loading on hashtag page
                 await _page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-                await _page.waitForTimeout(2000);
+                await safeWait(2000);
 
                 // Wait for new images to load after scroll
                 try {
