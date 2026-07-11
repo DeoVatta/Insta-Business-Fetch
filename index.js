@@ -29,7 +29,6 @@ import {
     writeHashtagBatch, markHashtagStatus, resetHashtagStatuses,
     writeProfile, flushProfileRows,
 } from './src/sheets.js';
-import { isIndonesian } from './src/classifier.js';
 import { MAX_API_ERRORS_CONSECUTIVE, REQUEST_DELAY } from './src/config.js';
 import {
     loadState, forceSave, checkpoint,
@@ -198,21 +197,12 @@ async function run() {
                 addHashtag('#' + clean, `post:${shortcode}`);
             }
 
-            // Layer 3: desc = caption text from the post
-            const postText = (postData.caption || '') + ' ' + (postData.hashtags || []).join(' ');
-            if (!isIndonesian('', '', postText)) {
-                console.log(`  [SKIP] @${username} — not Indonesian`); continue;
-            }
+            // Indonesian check removed — AI determines isIndonesian in sheets.js flushProfileRows()
 
             // Enrich profile
             const profile = await enrichProfile(username, postData);
             if (!profile) { globalErrorCount++; continue; }
             globalErrorCount = 0;
-
-            // Profile Indonesian check (bio = Layer 2, no caption available here)
-            if (!isIndonesian(profile.displayName || '', profile.bio || '', '')) {
-                console.log(`  [SKIP] @${username} — profile not Indonesian`); continue;
-            }
 
             // Mark as visited (depth 1)
             const visitedInfo = markVisited(username, 1);
@@ -403,13 +393,6 @@ async function processDiscoveryQueue(existingUsernames) {
         setPhase('profile-enrich', { username, depth });
         const profile = await enrichProfile(username);
         if (!profile) {
-            markQueueDone(username);
-            continue;
-        }
-
-        // Indonesian check (bio = Layer 2)
-        if (!isIndonesian(profile.displayName || '', profile.bio || '', '')) {
-            console.log(`  [SKIP] @${username} — not Indonesian`);
             markQueueDone(username);
             continue;
         }

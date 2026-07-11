@@ -210,7 +210,7 @@ async function flushProfileRows() {
         aiFailed = true;
     }
 
-    // Convert to rows — skip non-Indonesian profiles only when AI succeeded
+    // Convert to rows — skip non-Indonesian only when AI succeeded and flag is explicit false
     const rows = [];
     let skipped = 0;
     for (const profile of aiProfiles) {
@@ -221,12 +221,19 @@ async function flushProfileRows() {
         }
         rows.push(profileToRow(profile));
     }
+
+    if (rows.length === 0) {
+        console.log(`  [SHEETS BATCH] 0 Indonesian profiles (${skipped} filtered) -- nothing to write`);
+        return 0;
+    }
+
+    const ok = await appendRow('Instagram', 'L', rows);
     if (ok) {
         console.log(`  [SHEETS BATCH] Flushed ${rows.length} Indonesian profiles (${skipped} filtered) to Instagram sheet`);
     } else {
         // Put back on failure
         _profileBuffer.unshift(...profiles);
-        console.log(`  [SHEETS BATCH] Flush failed — ${profiles.length} rows returned to buffer`);
+        console.log(`  [SHEETS BATCH] Flush failed -- ${profiles.length} rows returned to buffer`);
     }
     return ok ? rows.length : 0;
 }
