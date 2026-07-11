@@ -653,18 +653,30 @@ async function enrichProfileFromPage(username) {
         return buildFallbackProfile(username);
     }
 
+    // Use safeEvaluate to handle dead page gracefully
+    const safeEvaluate = async (fn) => {
+        try {
+            return await _page.evaluate(fn);
+        } catch (e) {
+            if (e.message.includes('closed') || e.message.includes('Target') || e.message.includes('Execution context')) {
+                return null;
+            }
+            throw e;
+        }
+    };
+
     await _page.waitForTimeout(3000);
 
-    const bodyLen = await _page.evaluate(() => document.body.innerHTML.length);
-    if (bodyLen < 100) {
-        console.log(`  [PROFILE WARN] Empty page for @${username}`);
+    const bodyLen = await safeEvaluate(() => document.body.innerHTML.length);
+    if (bodyLen === null || bodyLen < 100) {
+        console.log(`  [PROFILE WARN] Page closed or empty for @${username}`);
         return buildFallbackProfile(username);
     }
 
     // OG meta tags
-    const ogTitle = await _page.evaluate(() => document.querySelector('meta[property="og:title"]')?.content || '');
-    const ogDesc = await _page.evaluate(() => document.querySelector('meta[property="og:description"]')?.content || '');
-    const ogImage = await _page.evaluate(() => document.querySelector('meta[property="og:image"]')?.content || '');
+    const ogTitle = await safeEvaluate(() => document.querySelector('meta[property="og:title"]')?.content || '');
+    const ogDesc = await safeEvaluate(() => document.querySelector('meta[property="og:description"]')?.content || '');
+    const ogImage = await safeEvaluate(() => document.querySelector('meta[property="og:image"]')?.content || '');
 
     // Parse og:description: "X Followers, Y Following, Z Posts"
     let followers = 0, following = 0, posts = 0;
@@ -683,7 +695,7 @@ async function enrichProfileFromPage(username) {
     // Extract native location from JSON-LD schema
     let nativeLocation = '';
     try {
-        const ldRaw = await _page.evaluate(() => {
+        const ldRaw = await safeEvaluate(() => {
             const el = document.querySelector('script[type="application/ld+json"]');
             return el ? el.textContent.trim() : '';
         });
@@ -694,7 +706,7 @@ async function enrichProfileFromPage(username) {
     } catch { /* ignore */ }
 
     // Body text for bio, category, WA link
-    const bodyText = await _page.evaluate(() => document.body.innerText || '');
+    const bodyText = await safeEvaluate(() => document.body.innerText || '') || '';
     const lines = bodyText.split('\n').map(l => l.trim()).filter(Boolean);
 
     let bio = '';
@@ -733,7 +745,7 @@ async function enrichProfileFromPage(username) {
     // Website from link-in-bio
     let website = '';
     try {
-        const websiteEl = await _page.evaluate(() => {
+        const websiteEl = await safeEvaluate(() => {
             // Direct link-in-bio section (new Instagram layout)
             const linkSection = document.querySelector('section a[href*="linktr.ee"], section a[href*="beacons.ai"], section a[href*="carrd.co"], section a[href*="linkbio"], section a[href*="biolink"], section a[href*="lnk.to"], section a[href*="solo.to"]');
             if (linkSection) return linkSection.getAttribute('href') || '';
@@ -844,16 +856,20 @@ async function scrapeHashtag(hashtag, maxPosts = 200) {
     const searchUrl = `https://www.instagram.com/explore/tags/${encodeURIComponent(cleanTag)}/`;
 
     await withTimeout(
-        _page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 40000 }),
+        _page.goto(searchUrl, { waitUntil: 'domcontentloaded' }),
         50000,
         `hashtag #${cleanTag}`
     );
 
-    // Wait for posts to render — use img inside post links (more reliable than article selector)
+    // Wait for posts to render
     try {
-        await _page.waitForSelector('a[href*="/p/"] img', { timeout: 20000 });
+        await withTimeout(
+            _page.waitForSelector('a[href*="/p/"] img', {}),
+            25000,
+            'wait posts selector'
+        );
     } catch (e) {
-        console.log(`  [WARN] No posts appeared — page may be blocked or slow to load`);
+        console.log(`  [WARN] No posts appeared — page may be blocked`);
     }
     await _page.waitForTimeout(3000);
 
