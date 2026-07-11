@@ -161,7 +161,7 @@ function extractWebsite(bio = '') {
 }
 
 // ===== BATCH CLASSIFY =====
-const SYSTEM_PROMPT = `You are a data extraction assistant for Indonesian business Instagram profiles.
+const SYSTEM_PROMPT = `You are a data extraction assistant for Indonesian WEDDING & GRADUATION (wisuda) business Instagram profiles.
 
 Analyze the profile data and extract business information. Return a JSON array ONLY -- no thinking, no explanation, no markdown, no text outside the JSON.
 
@@ -170,32 +170,33 @@ Each entry:
 
 Rules:
 - u: Match exactly as input username.
-- c (category): SPECIFIC business category based on bio, display name, captions, and hashtags. Examples:
-  * "Akuntansi / Pajak" -- akuntan, konsultan pajak, pembukuan, SPT
-  * "Consulting / Konsultan" -- bisnis konsultan umum, manajemen, legal
-  * "Fashion / Clothing" -- apparel, distro, sneakers, shoes, tas
-  * "Fashion Muslimah" -- hijab, mukena, gamis, busana muslim
-  * "Makanan & Minuman" -- F&B, kuliner, warung, cafe, restaurant, catering food
-  * "Minuman" -- kopi, teh, jus, minuman bottled/粉末
-  * "Kecantikan" -- skincare, kosmetik, parfum, beauty products
-  * "Kesehatan / Suplemen" -- obat, suplemen, vitamin, produk kesehatan
-  * "Elektronik / Gadget" -- HP, laptop, komputer, aksesoris elektronik
-  * "Pendidikan / Kursus" -- les, bimbingan belajar, kursus, sekolah
-  * "Fotografi / Videografi" -- fotografer, videografer, editor
-  * "Dekorasi / Event" -- dekorasi, organizer event, MC
-  * "Properti / Interior" -- property agent, interior design, furniture
-  * "Travel / Tourism" -- travel agent, tour, homestay, hotel
-  * "Otomotif" -- bengkel, spare part, modifikasi kendaraan
-  * "Pets / Hewan" -- pet shop, grooming, klinik hewan
-  * "Pertanian" -- bibit, pupuk, alat pertanian
-  * "Online Shop" -- general e-commerce, reseller, dropshipper
-  * "Jasa / Layanan" -- ONLY if truly generic/unknown. Try to be specific first.
-  Use Indonesian. Be SPECIFIC. NEVER default to "Jasa / Layanan" or "Other".
+- c (category): SPECIFIC wedding/graduation business category based on bio, display name, captions, and hashtags. Examples:
+  Wedding services:
+  * "MUA / Rias" -- makeup artist, rias pengantin, bridal makeup, hairstylist
+  * "Photographer" -- fotografer, videografer, wedding photo, prewedding
+  * "Catering" -- catering, katering, nasi box, wedding cake, tumpeng
+  * "Decorator" -- dekorasi, dekorator, dekor, decoration, styling
+  * "Venue / Gedung" -- venue, ballroom, hotel, resort pengantin
+  * "Wedding Organizer" -- WO, event organizer, EO, wedding planner, wedding coordinator
+  * "Gaun / Kebaya" -- gaun pengantin, kebaya, dress, gown, boutique
+  * "Undangan" -- undangan, invitation, kartu nikah, wedding invitation
+  * "MC / Celebran" -- MC pernikahan, celebrant, officiant
+  * "Souvenir / Seserahan" -- souvenir, seserahan, gift, bouquet, bantal couple
+  * "Music / Entertainment" -- DJ pernikahan, band, sound system, musik pengantin
+  * "Car / Transport" -- mobil pengantin, wedding car, transportasi
+  * "Salon / Beauty" -- salon, nails, lashes, beauty bridal
+  * "Khotmil / Pengajian" -- ustadz, khotmil, pengajian,penceramah
+  Graduation services:
+  * "Wisuda Photographer" -- fotografer wisuda, sesi foto wisuda, graduation photographer
+  * "Toga / Graduation" -- sewa toga, graduation gear, wisuda accessories
+  If account is NOT a wedding/graduation business (e.g., personal wedding account, generic shop, fashion unrelated to wedding), return isIndonesian=false.
+  NEVER default to generic categories like "Jasa / Layanan". Be specific.
 - l (location): City name in Indonesian (Jakarta, Semarang, Yogyakarta, Surabaya, Bandung). NOT province/country. Infer from username/bio or empty string.
 - w (whatsapp): Phone from bio. Format: 08xx... or +62... no spaces. Empty if not found.
 - e (website): URL from bio. Empty if not found.
 - eng: (likes + comments) / followers * 100. Format: "X.XX%". "N/A" if followers unknown or 0.
-- i (isIndonesian): TRUE if the profile/content appears to be Indonesian. Consider: bio language (Indonesian words: yang, dan, di, dengan, untuk, ini, itu, ada, etc.), location in Indonesia, Indonesian currency mentions (RP, rupiah), +62 phone, city names. FALSE if clearly foreign (English-only bio, foreign location, no Indonesian indicators).
+- i (isIndonesian): TRUE if the profile appears to be Indonesian. Consider: bio language (Indonesian words: yang, dan, di, dengan, untuk, ini, dll), location in Indonesia, Indonesian currency (RP, rupiah), +62 phone, city names. FALSE if clearly foreign (English-only bio, foreign location, no Indonesian indicators).
+  IMPORTANT: Also return FALSE if the account is a personal account (someone posting their own wedding/graduation photos) rather than a business account.
 - note: 1 sentence about this business in Indonesian describing what they sell/offer (max 100 chars).
 
 Return ALL profiles in the batch. Do NOT skip any.`;
@@ -354,30 +355,32 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
 }
 
 // ===== HASHTAG CLASSIFICATION =====
-const HT_SYSTEM_PROMPT = `You are a hashtag classifier for Indonesian wedding/bride industry.
+const HT_SYSTEM_PROMPT = `You are a hashtag classifier for Indonesian WEDDING & GRADUATION industry ONLY.
 
-Analyze each hashtag and determine if it is related to a business or brand.
-
-Each hashtag has the format: #hashtag (e.g. #muasemarang, #riasjogja)
-
-Return a JSON array ONLY -- no thinking, no explanation, no markdown.
-
-Each entry:
-{"h":"hashtag_name_without_#","business":true_or_false,"reason":"short reason in Indonesian"}
+Classify each hashtag as business=true ONLY if it is clearly related to wedding or graduation services.
 
 business=true if:
-- Related to wedding/makeup/beauty vendors (MUA, fotografer, dekorasi, catering, gaun, venue, organizer, MC, dll)
-- Business/service type hashtags
-- Location-based vendor hashtags (e.g. #muasemarang = business)
-- Brand or service account hashtags
+- Wedding vendors: MUA (makeup artist), hairstylist, photographer, videografer, catering, wedding organizer (WO), event organizer (EO), decorator/dekorasi, venue/gedung pernikahan, MC, wedding planner
+- Wedding products: gaun pengantin, kebaya, dress, seserahan, souvenir, invitation/undangan, bouquet, wedding cake, tumpeng
+- Wedding-related: prewedding, engagement, akad, resepsi, lamaran, rias pengantin, bridal makeup
+- Graduation/Wisuda: wisuda, toga, graduation, sesi foto wisuda
+- Location-tagged vendor: #muasemarang, #fotografersolo, #cateringjogja (business if clearly a vendor)
+- Beauty industry: makeup, skincare, lashes, nails — if context is bridal/graduation
 
 business=false if:
-- Generic/lifestyle hashtags (love, happy, beautiful, nature, dll)
-- General Instagram hashtags with no business relation
-- Personal/use hashtags unrelated to wedding services
-- Event-only hashtags without vendor relation
+- Generic/lifestyle hashtags (love, beautiful, happy, nature,风景)
+- Generic fashion hashtags unrelated to wedding (#fashion, #ootd, #bajulebaran)
+- Generic food hashtags unrelated to wedding catering
+- Personal/general hashtags: #weddingday, #love, #couplegoals (these describe personal events, not vendor services)
+- Hashtags from personal posts: anyone tagging their own wedding, graduation photos
+- General event hashtags without vendor relation
 
-Be strict -- only mark true if clearly a business/service hashtag.`;
+Each hashtag has the format: #hashtag_name
+
+Return a JSON array ONLY — no thinking, no explanation, no markdown.
+
+Each entry:
+{"h":"hashtag_name_without_#","business":true_or_false,"reason":"1-line reason in Indonesian"}
 
 // Max 50 hashtags per request — keep output small enough to fit in 8192 tokens
 const HT_BATCH_MAX = 50;
