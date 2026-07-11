@@ -175,7 +175,7 @@ async function readHashtagsInSheet() {
 }
 
 // ===== WRITE =====
-async function appendRow(sheetName, endCol, values) {
+async function appendRow(sheetName, endCol, values, retries = 0) {
     if (!sheetsClient) {
         console.log(`[SHEETS DRY] ${sheetName} APPEND:`, JSON.stringify(values).slice(0, 200));
         return false;
@@ -190,6 +190,13 @@ async function appendRow(sheetName, endCol, values) {
         });
         return res.data?.updates?.updatedRows > 0;
     } catch (e) {
+        const isQuota = e.message?.includes('RESOURCE_EXHAUSTED') || e.message?.includes('quota') || e.message?.includes('rate limit');
+        if (isQuota && retries < 2) {
+            const delay = (retries + 1) * 5000;
+            console.log(`[SHEETS] Quota error -- retry ${retries + 1}/3 in ${delay / 1000}s...`);
+            await new Promise(r => setTimeout(r, delay));
+            return appendRow(sheetName, endCol, values, retries + 1);
+        }
         console.log(`[SHEETS] Append error (${sheetName}): ${e.message}`);
         return false;
     }

@@ -127,12 +127,13 @@ function extractText(json) {
     return '';
 }
 
-// Strip markdown code blocks
+// Strip markdown code blocks + normalize newlines (AI sometimes splits JSON objects)
 function stripMarkdown(text) {
     return text
         .replace(/^```json\s*/i, '')
         .replace(/^```\s*/i, '')
         .replace(/\s*```$/i, '')
+        .replace(/\n+/g, ' ')  // collapse newlines — AI splits JSON objects across lines
         .trim();
 }
 
