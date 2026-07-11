@@ -207,22 +207,50 @@ function normaliseCategory(cat) {
     return String(cat).trim();
 }
 
+// Parse JSON array from AI response — handles multiple formats:
+// 1. Standard JSON array: [{...}, {...}]
+// 2. AI wrote each object on its own line (no commas between objects)
+// 3. Truncated/stripped — tries to recover partial objects
 function parseAiResponse(text, profileCount) {
     const stripped = stripMarkdown(text);
+    // Format 1: standard array
     try {
         return JSON.parse(stripped);
-    } catch (e) {
-        const startIdx = stripped.indexOf('[');
-        const endIdx = stripped.lastIndexOf(']');
-        if (startIdx !== -1 && endIdx !== -1) {
-            try {
-                return JSON.parse(stripped.slice(startIdx, endIdx + 1));
-            } catch (e2) {
-                throw new Error(`JSON parse failed: ${e.message}. Text: ${stripped.slice(0, 200)}`);
+    } catch (_) {}
+
+    // Format 2: objects on separate lines — detect and normalize
+    const lines = stripped.split('\n').map(l => l.trim()).filter(l => l.startsWith('{'));
+    if (lines.length >= 2) {
+        // Try wrapping in [ ] and joining with commas
+        const normalized = '[' + lines.map(l => {
+            // Ensure each object ends with } before adding comma
+            const trimmed = l.endsWith(',') ? l.slice(0, -1) : l;
+            return trimmed;
+        }).join(',') + ']';
+        try {
+            return JSON.parse(normalized);
+        } catch (_) {
+            // Fallback: try parsing each line individually
+            const results = [];
+            for (const line of lines) {
+                const trimmed = line.endsWith(',') ? line.slice(0, -1) : line;
+                try { results.push(JSON.parse(trimmed)); } catch (_) {}
             }
+            if (results.length > 0) return results;
         }
-        throw new Error(`No JSON array in response: ${stripped.slice(0, 200)}`);
     }
+
+    // Format 3: find first [ ... ] slice
+    const startIdx = stripped.indexOf('[');
+    const endIdx = stripped.lastIndexOf(']');
+    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+        try {
+            return JSON.parse(stripped.slice(startIdx, endIdx + 1));
+        } catch (e2) {
+            throw new Error(`JSON parse failed: ${e2.message}. Text: ${stripped.slice(0, 300)}`);
+        }
+    }
+    throw new Error(`No JSON array in response: ${stripped.slice(0, 200)}`);
 }
 
 /**
@@ -351,8 +379,8 @@ business=false if:
 
 Be strict -- only mark true if clearly a business/service hashtag.`;
 
-// Max 200 hashtags per request
-const HT_BATCH_MAX = 200;
+// Max 50 hashtags per request — keep output small enough to fit in 8192 tokens
+const HT_BATCH_MAX = 50;
 
 export async function classifyHashtagsBatch(hashtags) {
     if (!hashtags || hashtags.length === 0) return [];

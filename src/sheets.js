@@ -101,13 +101,31 @@ async function ensureSheets() {
                     existingHeader.length < header.length;
 
                 if (needsHeader) {
-                    await sheetsClient.spreadsheets.values.update({
-                        spreadsheetId: SHEETS_ID,
-                        range: `${name}!A1:${name === 'Instagram' ? 'L' : 'D'}1`,
-                        valueInputOption: 'USER_ENTERED',
-                        resource: { values: [header] }
-                    });
-                    console.log(`[SHEETS] Header written: "${name}" sheet`);
+                    // Retry wrapper for quota errors
+                    for (let attempt = 0; attempt < 3; attempt++) {
+                        try {
+                            await sheetsClient.spreadsheets.values.update({
+                                spreadsheetId: SHEETS_ID,
+                                range: `${name}!A1:${name === 'Instagram' ? 'L' : 'D'}1`,
+                                valueInputOption: 'USER_ENTERED',
+                                resource: { values: [header] }
+                            });
+                            console.log(`[SHEETS] Header written: "${name}" sheet`);
+                            break;
+                        } catch (e) {
+                            const isQuota = e.message?.includes('RESOURCE_EXHAUSTED') ||
+                                e.message?.includes('quota') ||
+                                e.message?.includes('rate limit');
+                            if (isQuota && attempt < 2) {
+                                const delay = (attempt + 1) * 5000;
+                                console.log(`[SHEETS] Header write quota error — retry ${attempt + 1}/3 in ${delay / 1000}s...`);
+                                await new Promise(r => setTimeout(r, delay));
+                            } else {
+                                console.warn(`[SHEETS] Header write error (${name}): ${e.message}`);
+                                break;
+                            }
+                        }
+                    }
                 }
             } catch (e) {
                 console.warn(`[SHEETS] Header check "${name}": ${e.message}`);
@@ -358,13 +376,30 @@ async function markHashtagStatus(hashtag, status) {
         const row = rows[i];
         if (row && row[0] && row[0].replace(/^#/, '').toLowerCase().trim() === clean) {
             const sheetRow = i + 1;
-            await sheetsClient.spreadsheets.values.update({
-                spreadsheetId: SHEETS_ID,
-                range: `Hashtags!D${sheetRow}:D${sheetRow}`,
-                valueInputOption: 'USER_ENTERED',
-                resource: { values: [[status]] }
-            });
-            console.log(`[SHEETS] Hashtag #${clean} → ${status}`);
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    await sheetsClient.spreadsheets.values.update({
+                        spreadsheetId: SHEETS_ID,
+                        range: `Hashtags!D${sheetRow}:D${sheetRow}`,
+                        valueInputOption: 'USER_ENTERED',
+                        resource: { values: [[status]] }
+                    });
+                    console.log(`[SHEETS] Hashtag #${clean} → ${status}`);
+                    break;
+                } catch (e) {
+                    const isQuota = e.message?.includes('RESOURCE_EXHAUSTED') ||
+                        e.message?.includes('quota') ||
+                        e.message?.includes('rate limit');
+                    if (isQuota && attempt < 2) {
+                        const delay = (attempt + 1) * 5000;
+                        console.log(`[SHEETS] markHashtagStatus quota error — retry ${attempt + 1}/3 in ${delay / 1000}s...`);
+                        await new Promise(r => setTimeout(r, delay));
+                    } else {
+                        console.warn(`[SHEETS] markHashtagStatus error (#${clean}): ${e.message}`);
+                        break;
+                    }
+                }
+            }
             break;
         }
     }
