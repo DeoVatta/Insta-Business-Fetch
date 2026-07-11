@@ -74,9 +74,7 @@ async function run() {
         const fs = await import('fs');
         const statePath = './discovery-state.json';
         if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
-        // Reload fresh state (no currentHashtag)
-        const { loadState: reloadState } = await import('./src/state.js');
-        const freshState = await reloadState();
+        // Reset in-memory state object so later code picks up fresh defaults
         state.currentHashtag = null;
         state.hashtagStatus = null;
         state.currentPhase = null;
@@ -85,7 +83,8 @@ async function run() {
         state.visited = {};
         state.hashtags = {};
         state.stats = { profiles: 0, clients: 0, batches: 0, hashtagsWritten: 0, aiProfiles: 0 };
-        console.log(`[STATE] Cleared — will resume from "${state.currentHashtag || 'next available'}" via sheet.`);
+        existingUsernames.clear();
+        console.log(`[STATE] Cleared — will resume from next available hashtag via sheet.`);
     }
 
     // Get pending hashtags from sheet (includes Pending + Executing for crash recovery)
