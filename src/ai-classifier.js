@@ -141,7 +141,7 @@ Each entry in output:
 {"u":"username","c":"category","l":"location","w":"whatsapp","e":"website","eng":"engagement_rate_percent","note":"1-line-summary"}
 
 Rules:
-- c (category): MUA, Fotografer, Videografer, Catering, Dekorasi, Venue, Gaun/Kebaya, Wedding Planner, Salon/Beauty, MC, Religious Services, or Other
+- c (category): Business type ONLY — MUA, Fotografer, Videografer, Catering, Dekorasi, Venue, Gaun/Kebaya, Wedding Planner, Salon/Beauty, MC, Religious Services, Souvenir, Undangan, or Other. NEVER output "Client" — that is account type, not business category.
 - l (location): ONLY city name in Indonesian (e.g. "Semarang", "Yogyakarta", "Solo"). NOT province. NOT country. If unclear, use the city indicated in username/bio.
 - w (whatsapp): Extract phone number from bio. Format: 08xx... or +62... with no spaces/dashes. Empty string if not found.
 - e (website): Extract website URL from bio. Empty string if not found.
@@ -229,6 +229,10 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
 
                 // AI-enhanced data
                 const aiCategory = ai.c || profile.category || 'Other';
+                // "Client" is account type, not business category — never use it as category
+                const isClient = /^client$/i.test(aiCategory);
+                const isValidCategory = aiCategory && aiCategory !== 'Other' && !isClient;
+                const category = isValidCategory ? aiCategory : (profile.category || 'Other');
                 const aiLocation = ai.l || profile.location || '';
                 const aiWhatsApp = ai.w || extractWhatsApp(profile.bio || '');
                 const aiWebsite = ai.e || extractWebsite(profile.bio || '');
@@ -237,7 +241,7 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
 
                 results.push({
                     ...profile,
-                    category: aiCategory !== 'Other' ? aiCategory : (profile.category || 'Other'),
+                    category,
                     location: aiLocation || profile.location || '',
                     whatsapp: aiWhatsApp,
                     website: aiWebsite,
