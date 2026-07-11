@@ -71,10 +71,14 @@ function calcEngagementFromPosts(posts, followers) {
  * 1. Get profile data from profile page (bio, followers, following, posts)
  * 2. Scrape recent posts from profile grid (for collab/mention discovery)
  * 3. Fetch user feed via REST API (for accurate engagement rate)
- * 4. Classify: business category + location
+ * 4. Classify: business category + location (bio + displayName + post captions)
  * 5. Calculate engagement from aggregated post stats (UpDog method)
  */
 async function enrichProfile(username, postData = null) {
+    // Collected data across post enrichment
+    const postCaptions = [];
+    const postHashtags = new Set();
+
     try {
         // Get profile page data
         const profile = await enrichProfileFromPage(username);
@@ -108,25 +112,40 @@ async function enrichProfile(username, postData = null) {
             console.log(`  [POSTS] Found ${profilePostUrls.length} posts on profile`);
             profile.profilePostUrls = profilePostUrls;
 
-            // Enrich posts in parallel batches (3 concurrent, 2s between batches)
-            // Collect all likes/comments for engagement calculation
             if (profilePostUrls.length > 0) {
                 const enrichedPosts = await enrichPostsBatch(profilePostUrls.slice(0, 6), 3, 2000);
                 for (const pd of enrichedPosts) {
-                    pd.hashtags.forEach(h => profile.hashtags.add(h));
+                    pd.hashtags.forEach(h => {
+                        profile.hashtags.add(h);
+                        postHashtags.add(h);
+                    });
                     pd.mentions.forEach(m => profile.mentions.add(m));
                     pd.collabs.forEach(c => profile.collabs.add(c));
-                    // Aggregate likes/comments from each post
                     profile.postLikes += pd.likes || 0;
                     profile.postComments += pd.comments || 0;
+                    if (pd.caption) postCaptions.push(pd.caption);
                 }
             }
         } catch (e) {
             console.log(`  [WARN] Could not scrape profile posts @${username}: ${e.message}`);
         }
 
-        // Fetch user feed via REST API for accurate engagement rate
-        // This gives us like_count + comment_count for each recent post
+        // Classify: bio + displayName + post captions + hashtags for max signal
+        const bioText = profile.bio || '';
+        const displayNameText = profile.displayName || '';
+        const captionsText = postCaptions.join(' ');
+        const hashtagsText = [...postHashtags].join(' ');
+        const fullCategoryText = `${bioText} ${displayNameText} ${captionsText} ${hashtagsText}`.trim();
+
+        profile.location = detectLocation(bioText, displayNameText, profile.nativeLocation || '');
+        profile.category = detectCategory(fullCategoryText, '');
+
+        // If category is still Other, try hashtags alone
+        if (profile.category === 'Other' && hashtagsText.length > 3) {
+            profile.category = detectCategory(hashtagsText, '');
+        }
+
+        // Engagement: UpDog method — fetch user feed → avg(likes+comments)/followers
         if (profile.followers > 0) {
             try {
                 const feedPosts = await fetchUserFeed(username, 18);
@@ -137,7 +156,6 @@ async function enrichProfile(username, postData = null) {
                     const avgComments = (feedPosts.reduce((s, p) => s + (p.commentCount || 0), 0) / feedPosts.length).toFixed(1);
                     console.log(`  [ENGAGEMENT FEED] ${feedPosts.length} posts avg | ${avgLikes} likes + ${avgComments} comments | ${profile.engagementRate}%`);
                 } else {
-                    // Fallback to aggregated single-post engagement
                     profile.engagementRate = calculateEngagement(
                         profile.postLikes,
                         profile.postComments,
@@ -154,16 +172,6 @@ async function enrichProfile(username, postData = null) {
             }
         } else {
             profile.engagementRate = 0;
-        }
-
-        // Classify business category and location
-        profile.location = detectLocation(profile.bio || '', profile.displayName || '', profile.nativeLocation || '');
-        profile.category = detectCategory(profile.bio || '', profile.displayName || '');
-
-        // If bio is empty, try classify from hashtags
-        const hasBio = (profile.bio || '').trim().length > 5;
-        if (!hasBio) {
-            profile.category = detectCategory([...profile.hashtags].join(' '), '');
         }
 
         console.log(`  [CLASSIFY] ${profile.category || 'Other'} | ${profile.location || 'N/A'}`);

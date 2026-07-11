@@ -66,8 +66,8 @@ export function detectLocation(bio = '', displayName = '', nativeLocation = '') 
     return '';
 }
 
-export function detectCategory(bio = '', displayName = '') {
-    const text = ((bio || '') + ' ' + (displayName || '')).toLowerCase();
+export function detectCategory(bio = '', displayName = '', extraText = '') {
+    const text = ((bio || '') + ' ' + (displayName || '') + ' ' + (extraText || '')).toLowerCase();
 
     if (/hairstylist|hairdo/i.test(text)) return 'Hairstylist';
     if (/bridalmakeup/i.test(text)) return 'Bridal Makeup';
