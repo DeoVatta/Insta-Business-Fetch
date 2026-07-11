@@ -26,8 +26,20 @@ const IG_HEADER = [
 ];
 
 const HT_HEADER = [
-    'No', 'Hashtag', 'Found', 'Status'
+    'No', 'Hashtag', 'Found', 'Status', 'Executed At'
 ];
+
+// WIB offset: UTC+7
+function wibNow() {
+    const d = new Date();
+    const wib = new Date(d.getTime() + 7 * 3600 * 1000);
+    const dd = String(wib.getUTCDate()).padStart(2, '0');
+    const mm = String(wib.getUTCMonth() + 1).padStart(2, '0');
+    const yy = String(wib.getUTCFullYear()).slice(-2);
+    const hh = String(wib.getUTCHours()).padStart(2, '0');
+    const min = String(wib.getUTCMinutes()).padStart(2, '0');
+    return `${dd}-${mm}-${yy} ${hh}:${min}`;
+}
 
 // ===== INIT =====
 let sheetsClient = null;
@@ -93,7 +105,7 @@ async function ensureSheets() {
             try {
                 const res = await sheetsClient.spreadsheets.values.get({
                     spreadsheetId: SHEETS_ID,
-                    range: `${name}!A1:${name === 'Instagram' ? 'L' : 'D'}1`
+                    range: `${name}!A1:${name === 'Instagram' ? 'L' : 'E'}1`
                 });
                 const existingHeader = res.data.values?.[0] || [];
                 const needsHeader = existingHeader.length === 0 ||
@@ -106,7 +118,7 @@ async function ensureSheets() {
                         try {
                             await sheetsClient.spreadsheets.values.update({
                                 spreadsheetId: SHEETS_ID,
-                                range: `${name}!A1:${name === 'Instagram' ? 'L' : 'D'}1`,
+                                range: `${name}!A1:${name === 'Instagram' ? 'L' : 'E'}1`,
                                 valueInputOption: 'USER_ENTERED',
                                 resource: { values: [header] }
                             });
@@ -166,15 +178,17 @@ async function readVisitedProfiles() {
 }
 
 // Read approved hashtags from Hashtags sheet (column B, status != Executed)
+// Includes Executing for crash recovery
 async function readHashtags() {
-    const rows = await readRange('Hashtags!A1:D2000');
+    const rows = await readRange('Hashtags!A1:E2000');
     const hashtags = [];
     for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
         if (!row || !row[1]) continue;
         const tag = row[1].trim();
         const status = (row[3] || '').trim();
-        if (tag && !['Executed'].includes(status)) {
+        // Include Pending AND Executing (crash recovery)
+        if (tag && status !== 'Executed') {
             hashtags.push(tag.startsWith('#') ? tag : '#' + tag);
         }
     }
@@ -368,23 +382,26 @@ async function writeHashtagBatch(hashtags, existingHashtags) {
 }
 
 // Mark a hashtag as Executing or Executed
+// Executed → write timestamp to column E (Executed At)
 async function markHashtagStatus(hashtag, status) {
     if (!sheetsClient || !hashtag) return;
     const clean = hashtag.replace(/^#/, '').toLowerCase().trim();
-    const rows = await readRange('Hashtags!B1:D2000');
+    const rows = await readRange('Hashtags!B1:E2000');
     for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
         if (row && row[0] && row[0].replace(/^#/, '').toLowerCase().trim() === clean) {
             const sheetRow = i + 1;
+            const updateCol = status === 'Executed' ? 'E' : 'D';
+            const updateValue = status === 'Executed' ? wibNow() : status;
             for (let attempt = 0; attempt < 3; attempt++) {
                 try {
                     await sheetsClient.spreadsheets.values.update({
                         spreadsheetId: SHEETS_ID,
-                        range: `Hashtags!D${sheetRow}:D${sheetRow}`,
+                        range: `Hashtags!${updateCol}${sheetRow}:${updateCol}${sheetRow}`,
                         valueInputOption: 'USER_ENTERED',
-                        resource: { values: [[status]] }
+                        resource: { values: [[updateValue]] }
                     });
-                    console.log(`[SHEETS] Hashtag #${clean} → ${status}`);
+                    console.log(`[SHEETS] Hashtag #${clean} → ${status}${status === 'Executed' ? ' @' + updateValue : ''}`);
                     break;
                 } catch (e) {
                     const isQuota = e.message?.includes('RESOURCE_EXHAUSTED') ||
@@ -511,4 +528,5 @@ export {
     initSheets, readHashtags, readHashtagsWithStatus, readHashtagsInSheet, readVisitedProfiles,
     writeHashtagBatch, markHashtagStatus, resetHashtagStatuses,
     writeProfile, writeClientFromComment, flushProfileRows,
+    wibNow,
 };

@@ -66,10 +66,32 @@ async function run() {
         Object.keys(state.hashtags)
     );
 
-    // Get pending hashtags from sheet
+    // CRASH RECOVERY: If state has an Executing hashtag, it means previous run crashed mid-processing.
+    // Clear state and resume from that hashtag in the sheet (status=Executing means it's in-progress).
+    if (state.hashtagStatus === 'Executing' && state.currentHashtag) {
+        console.log(`[STATE] Previous run crashed mid-hashtag "${state.currentHashtag}" — clearing state and resuming...`);
+        // Clear state file
+        const fs = await import('fs');
+        const statePath = './discovery-state.json';
+        if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
+        // Reload fresh state (no currentHashtag)
+        const { loadState: reloadState } = await import('./src/state.js');
+        const freshState = await reloadState();
+        state.currentHashtag = null;
+        state.hashtagStatus = null;
+        state.currentPhase = null;
+        state.currentItem = null;
+        state.queue = [];
+        state.visited = {};
+        state.hashtags = {};
+        state.stats = { profiles: 0, clients: 0, batches: 0, hashtagsWritten: 0, aiProfiles: 0 };
+        console.log(`[STATE] Cleared — will resume from "${state.currentHashtag || 'next available'}" via sheet.`);
+    }
+
+    // Get pending hashtags from sheet (includes Pending + Executing for crash recovery)
     const pendingHashtags = await readHashtags();
 
-    // Build available list from sheet
+    // Build available list from sheet — include Pending and Executing
     const doneInState = new Set(
         Object.entries(state.hashtags)
             .filter(([, v]) => v.status === 'Executed')
