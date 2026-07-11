@@ -13,7 +13,6 @@ import {
     initBrowser,
     fetchUserFeed,
 } from './scraper.js';
-import { detectCategory, detectLocation, calculateEngagement } from './classifier.js';
 import { REQUEST_DELAY, PROFILES_PER_HASHTAG } from './config.js';
 
 function sleep(ms) {
@@ -130,20 +129,9 @@ async function enrichProfile(username, postData = null) {
             console.log(`  [WARN] Could not scrape profile posts @${username}: ${e.message}`);
         }
 
-        // Classify: bio + displayName + post captions + hashtags for max signal
-        const bioText = profile.bio || '';
-        const displayNameText = profile.displayName || '';
-        const captionsText = postCaptions.join(' ');
-        const hashtagsText = [...postHashtags].join(' ');
-        const fullCategoryText = `${bioText} ${displayNameText} ${captionsText} ${hashtagsText}`.trim();
-
-        profile.location = detectLocation(bioText, displayNameText, profile.nativeLocation || '');
-        profile.category = detectCategory(fullCategoryText, '');
-
-        // If category is still Other, try hashtags alone
-        if (profile.category === 'Other' && hashtagsText.length > 3) {
-            profile.category = detectCategory(hashtagsText, '');
-        }
+        // Classification is done by AI in classifyProfilesBatch() — no regex here
+        profile.location = profile.nativeLocation || '';
+        profile.category = '';
 
         // Engagement: UpDog method — fetch user feed → avg(likes+comments)/followers
         if (profile.followers > 0) {
@@ -156,25 +144,16 @@ async function enrichProfile(username, postData = null) {
                     const avgComments = (feedPosts.reduce((s, p) => s + (p.commentCount || 0), 0) / feedPosts.length).toFixed(1);
                     console.log(`  [ENGAGEMENT FEED] ${feedPosts.length} posts avg | ${avgLikes} likes + ${avgComments} comments | ${profile.engagementRate}%`);
                 } else {
-                    profile.engagementRate = calculateEngagement(
-                        profile.postLikes,
-                        profile.postComments,
-                        profile.followers
-                    );
+                    profile.engagementRate = profile.followers > 0 ? (((profile.postLikes + profile.postComments) / profile.followers) * 100).toFixed(2) : 0;
                 }
             } catch (e) {
                 console.log(`  [WARN] Could not fetch user feed @${username}: ${e.message}`);
-                profile.engagementRate = calculateEngagement(
-                    profile.postLikes,
-                    profile.postComments,
-                    profile.followers
-                );
+                profile.engagementRate = profile.followers > 0 ? (((profile.postLikes + profile.postComments) / profile.followers) * 100).toFixed(2) : 0;
             }
         } else {
             profile.engagementRate = 0;
         }
 
-        console.log(`  [CLASSIFY] ${profile.category || 'Other'} | ${profile.location || 'N/A'}`);
         console.log(`  [ENGAGEMENT] ${profile.engagementRate}% (${profile.followers} followers)`);
         console.log(`  [TAGS] Hashtags: ${[...profile.hashtags].slice(0, 5).join(' ')}`);
         console.log(`  [DISC] Mentions: ${[...profile.mentions].slice(0, 3).join(', ') || 'none'}`);

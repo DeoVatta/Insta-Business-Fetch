@@ -289,20 +289,10 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
 
             console.log(`[AI] Batch ${batchNum} done: ${parsed.length} results`);
         } catch (e) {
-            console.warn(`[AI] Batch ${batchNum} failed: ${e.message} — using fallback data`);
-            // On failure, use enriched data + regex extraction as fallback
-            for (const profile of batch) {
-                results.push({
-                    ...profile,
-                    whatsapp: extractWhatsApp(profile.bio || ''),
-                    website: extractWebsite(profile.bio || ''),
-                    analytics: profile.engagementRate ? `${profile.engagementRate}%` : 'N/A',
-                    aiNote: 'AI unavailable — used rule-based extraction',
-                    aiBatch: batchNum,
-                });
-            }
-        }
-    }
+            console.warn(`[AI] Batch ${batchNum} failed: ${e.message} — retrying...`);
+            await new Promise(r => setTimeout(r, 30000));
+            b--;
+            continue;
 
     return results;
 }

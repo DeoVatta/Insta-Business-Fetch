@@ -425,25 +425,26 @@ async function processDiscoveryQueue(existingUsernames) {
 }
 
 // ===== SIGNALS =====
-process.on('SIGINT', async () => {
-    console.log('\n[ABORT] Saving state before exit...');
+async function gracefulShutdown(signal) {
+    console.log(`\n[${signal}] Saving state before exit...`);
     await flushProfileRows();
     await forceSave();
     printStats();
-    // Don't close browser — PM2 handles cleanup; closing here kills in-flight enrichment
-    process.exit(1);
-});
+    process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 process.on('uncaughtException', async (e) => {
-    console.error('[CRASH]', e.message);
+    console.error('[CRASH uncaughtException]', e.message, e.stack?.split('\n')[1] || '');
     await flushProfileRows().catch(() => {});
     await forceSave();
-    await closeBrowser().catch(() => {});
     process.exit(1);
 });
 
 process.on('unhandledRejection', async (e) => {
-    console.error('[REJECT]', e);
+    console.error('[REJECT unhandledRejection]', String(e));
     await forceSave();
 });
 
