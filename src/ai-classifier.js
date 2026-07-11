@@ -161,23 +161,28 @@ function extractWebsite(bio = '') {
 }
 
 // ===== BATCH CLASSIFY =====
-const SYSTEM_PROMPT = `You are a data extraction assistant for Indonesian wedding/business profiles.
+const SYSTEM_PROMPT = `You are a data extraction assistant for Indonesian business Instagram profiles.
 
-Extract information from the profile data below. Return a JSON array ONLY — no thinking, no explanation, no markdown, no text outside the JSON.
+Analyze the profile data and extract business information. Return a JSON array ONLY — no thinking, no explanation, no markdown, no text outside the JSON.
 
-Each entry in output:
+Each entry:
 {"u":"username","c":"category","l":"location","w":"whatsapp","e":"website","eng":"engagement_rate_percent","note":"1-line-summary"}
 
 Rules:
-- c (category): Business type — MUA, Fotografer, Videografer, Catering, Dekorasi, Venue, Gaun/Kebaya, Wedding Planner, Salon/Beauty, MC, Religious Services, Souvenir, Undangan, Hairstylist, Bridal Makeup, or Other. Never output "Client".
-- l (location): ONLY city name in Indonesian (e.g. "Semarang", "Yogyakarta", "Solo"). NOT province. NOT country. If unclear, use the city indicated in username/bio.
+- c (category): Determine the actual business category based on bio, display name, captions, and hashtags. Examples: "Fashion / Clothing", "Makanan & Minuman", "Beauty / Kosmetik", "Kesehatan / Suplemen", "Elektronik", "Rumah Tangga", "Hewan Peliharaan", "Anak-anak", "Pendidikan", "Jasa / Layanan", "Online Shop", "Pertanian", "Otomotif", "Fotografi", "Kecantikan", "Fashion Muslimah", "Fnb", "Minuman", "Makanan", "Travel", "Properti", dll. Use Indonesian. Be SPECIFIC to what the account actually sells/offers. NEVER use "Other" unless truly unclassifiable.
+- l (location): ONLY city name in Indonesian (e.g. "Semarang", "Yogyakarta", "Surabaya", "Jakarta"). NOT province. NOT country. If unclear, infer from username/bio or use empty string.
 - w (whatsapp): Extract phone number from bio. Format: 08xx... or +62... with no spaces/dashes. Empty string if not found.
 - e (website): Extract website URL from bio. Empty string if not found.
-- eng: Calculate engagement rate as: (likes + comments) / followers * 100. If followers unknown, use 0. Format: "X.XX%". If followers is 0 or unknown, return "N/A".
-- note: One sentence about this business in Indonesian (max 100 chars).
-- Match output username (u) exactly as input.`;
+- eng: Calculate engagement rate as: (likes + comments) / followers * 100. If followers unknown or 0, return "N/A". Format: "X.XX%".
+- note: One sentence about this business in Indonesian describing what they sell/offer (max 100 chars).
+- Match output username (u) exactly as input. Return ALL profiles in the batch. Do NOT skip any profile.`;
 
-const USER_PROMPT_PREFIX = 'Process this batch:\n';
+const USER_PROMPT_PREFIX = 'Extract from this batch:\n';
+
+function normaliseCategory(cat) {
+    if (!cat) return '';
+    return String(cat).trim();
+}
 
 function parseAiResponse(text, profileCount) {
     const stripped = stripMarkdown(text);
@@ -245,6 +250,12 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
             const text = await aiRequest(messages, SYSTEM_PROMPT);
             const parsed = parseAiResponse(text, batch.length);
 
+            // Debug: log first profile's AI result
+            if (parsed && parsed.length > 0) {
+                const first = parsed[0];
+                console.log(`  [AI DEBUG] @${first.u} → category="${first.c}", location="${first.l}", wa="${first.w}", eng="${first.eng}"`);
+            }
+
             // Build lookup by username
             const lookup = {};
             for (const item of parsed) {
@@ -255,12 +266,9 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
                 const key = (profile.username || '').toLowerCase();
                 const ai = lookup[key] || {};
 
-                // AI-enhanced data
-                const aiCategory = ai.c || profile.category || 'Other';
-                // "Client" is not a business category — never use it
-                const isClient = /^client$/i.test(aiCategory);
-                const isValidCategory = aiCategory && aiCategory !== 'Other' && !isClient;
-                const category = isValidCategory ? aiCategory : (profile.category || 'Other');
+                // AI is PRIMARY — use whatever AI returned, just normalise whitespace
+                const rawAiCategory = ai.c || '';
+                const finalCategory = normaliseCategory(rawAiCategory) || 'Unknown';
                 const aiLocation = ai.l || profile.location || '';
                 const aiWhatsApp = ai.w || extractWhatsApp(profile.bio || '');
                 const aiWebsite = ai.e || extractWebsite(profile.bio || '');
@@ -269,7 +277,7 @@ export async function classifyProfilesBatch(profiles, concurrency = 1) {
 
                 results.push({
                     ...profile,
-                    category,
+                    category: finalCategory,
                     location: aiLocation || profile.location || '',
                     whatsapp: aiWhatsApp,
                     website: aiWebsite,
