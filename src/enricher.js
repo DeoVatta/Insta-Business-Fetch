@@ -13,7 +13,7 @@ import {
     initBrowser,
     fetchUserFeed,
 } from './scraper.js';
-import { classifyAccount, classifyFromHashtags, detectCategory, detectLocation, calculateEngagement } from './classifier.js';
+import { detectCategory, detectLocation, calculateEngagement } from './classifier.js';
 import { REQUEST_DELAY, PROFILES_PER_HASHTAG } from './config.js';
 
 function sleep(ms) {
@@ -68,10 +68,10 @@ function calcEngagementFromPosts(posts, followers) {
 
 /**
  * Full profile enrichment:
- * 1. Get profile data from profile page (bio, followers, following, posts, category)
+ * 1. Get profile data from profile page (bio, followers, following, posts)
  * 2. Scrape recent posts from profile grid (for collab/mention discovery)
  * 3. Fetch user feed via REST API (for accurate engagement rate)
- * 4. Classify: competitor/vendor/client
+ * 4. Classify: business category + location
  * 5. Calculate engagement from aggregated post stats (UpDog method)
  */
 async function enrichProfile(username, postData = null) {
@@ -156,20 +156,17 @@ async function enrichProfile(username, postData = null) {
             profile.engagementRate = 0;
         }
 
-        // Classify
-        const fullText = (profile.bio || '') + ' ' + (profile.displayName || '') + ' ' + (profile.category || '');
-        profile.type = classifyAccount(profile.bio || '', profile.displayName || '');
+        // Classify business category and location
         profile.location = detectLocation(profile.bio || '', profile.displayName || '', profile.nativeLocation || '');
-        profile.category = detectCategory(profile.bio || '', profile.displayName || '', profile.type);
+        profile.category = detectCategory(profile.bio || '', profile.displayName || '');
 
-        // If bio is empty OR type is still client, try classify from hashtags
+        // If bio is empty, try classify from hashtags
         const hasBio = (profile.bio || '').trim().length > 5;
-        if (!hasBio || (profile.type === 'client' && profile.hashtags.size > 0)) {
-            profile.type = classifyFromHashtags([...profile.hashtags]);
-            profile.category = detectCategory([...profile.hashtags].join(' '), '', profile.type);
+        if (!hasBio) {
+            profile.category = detectCategory([...profile.hashtags].join(' '), '');
         }
 
-        console.log(`  [CLASSIFY] ${profile.type} | ${profile.category} | ${profile.location || 'N/A'}`);
+        console.log(`  [CLASSIFY] ${profile.category || 'Other'} | ${profile.location || 'N/A'}`);
         console.log(`  [ENGAGEMENT] ${profile.engagementRate}% (${profile.followers} followers)`);
         console.log(`  [TAGS] Hashtags: ${[...profile.hashtags].slice(0, 5).join(' ')}`);
         console.log(`  [DISC] Mentions: ${[...profile.mentions].slice(0, 3).join(', ') || 'none'}`);
