@@ -858,8 +858,9 @@ async function scrapeHashtag(hashtag, maxPosts = 200) {
     await _page.waitForTimeout(3000);
 
     // Wrap entire scroll loop with 3-minute timeout
+    let postUrls = [];
     try {
-        await withTimeout((async () => {
+        postUrls = await withTimeout((async () => {
             // Scroll to load more posts
             let prevCount = 0;
             let consecutiveEmpty = 0;
