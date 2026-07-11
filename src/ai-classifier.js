@@ -52,20 +52,28 @@ function aiRequest(messages, systemPrompt, maxTokens = 8192, retries = 0) {
             res.on('data', c => body += c);
             res.on('end', () => {
                 if (res.statusCode === 429) {
-                    // Rate limited — retry with backoff
+                    // Rate limited
                     if (retries < MAX_RETRIES) {
                         const delay = BASE_DELAY_MS * Math.pow(2, retries);
-                        console.log(`  [AI] Rate limited — retrying in ${delay / 1000}s...`);
+                        console.log(`  [AI] Rate limited (${res.statusCode}) — retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
                         setTimeout(() => {
                             resolve(aiRequest(messages, systemPrompt, maxTokens, retries + 1));
                         }, delay);
                     } else {
-                        reject(new Error('Rate limited after 3 retries'));
+                        reject(new Error(`Rate limited after ${MAX_RETRIES} retries — will retry with longer delay`));
                     }
                     return;
                 }
                 if (res.statusCode !== 200) {
-                    reject(new Error(`AI request failed: ${res.statusCode} — ${body.slice(0, 200)}`));
+                    if (retries < MAX_RETRIES) {
+                        const delay = BASE_DELAY_MS * Math.pow(2, retries);
+                        console.log(`  [AI] Non-200 (${res.statusCode}) — retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
+                        setTimeout(() => {
+                            resolve(aiRequest(messages, systemPrompt, maxTokens, retries + 1));
+                        }, delay);
+                    } else {
+                        reject(new Error(`AI request failed: ${res.statusCode} — ${body.slice(0, 200)}`));
+                    }
                     return;
                 }
                 try {
@@ -73,19 +81,39 @@ function aiRequest(messages, systemPrompt, maxTokens = 8192, retries = 0) {
                     const text = extractText(json);
                     resolve(text);
                 } catch (e) {
-                    reject(new Error(`AI parse error: ${e.message} — body: ${body.slice(0, 300)}`));
+                    if (retries < MAX_RETRIES) {
+                        const delay = BASE_DELAY_MS * Math.pow(2, retries);
+                        console.log(`  [AI] Parse error — retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
+                        setTimeout(() => {
+                            resolve(aiRequest(messages, systemPrompt, maxTokens, retries + 1));
+                        }, delay);
+                    } else {
+                        reject(new Error(`AI parse error: ${e.message} — body: ${body.slice(0, 300)}`));
+                    }
                 }
             });
         });
         req.on('error', e => {
             if (retries < MAX_RETRIES) {
                 const delay = BASE_DELAY_MS * Math.pow(2, retries);
+                console.log(`  [AI] Network error — retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
                 setTimeout(() => resolve(aiRequest(messages, systemPrompt, maxTokens, retries + 1)), delay);
             } else {
                 reject(e);
             }
         });
-        req.setTimeout(120000, () => { req.destroy(); reject(new Error('AI request timeout')); });
+        req.setTimeout(120000, () => {
+            req.destroy();
+            if (retries < MAX_RETRIES) {
+                const delay = BASE_DELAY_MS * Math.pow(2, retries);
+                console.log(`  [AI] Request timeout — retry ${retries + 1}/${MAX_RETRIES} in ${delay / 1000}s...`);
+                setTimeout(() => {
+                    resolve(aiRequest(messages, systemPrompt, maxTokens, retries + 1));
+                }, delay);
+            } else {
+                reject(new Error('AI request timeout'));
+            }
+        });
         req.write(data);
         req.end();
     });
@@ -303,8 +331,8 @@ const HT_BATCH_MAX = 200;
 export async function classifyHashtagsBatch(hashtags) {
     if (!hashtags || hashtags.length === 0) return [];
     if (!OLAGON_API_KEY) {
-        console.warn('[AI] OLAGON_API_KEY not set — skipping hashtag classification');
-        return hashtags.map(t => ({ tag: t, business: true, reason: 'no AI key' }));
+        console.warn('[AI] OLAGON_API_KEY not set — hashtag classification skipped, pipeline will retry');
+        throw new Error('OLAGON_API_KEY not configured');
     }
 
     const unique = [...new Set(hashtags.map(t => t.replace(/^#/, '').toLowerCase().trim()))].filter(Boolean);
@@ -344,10 +372,9 @@ export async function classifyHashtagsBatch(hashtags) {
 
             console.log(`[AI] Hashtag batch ${batchNum}: ${parsed.length} results`);
         } catch (e) {
-            console.warn(`[AI] Hashtag batch ${batchNum} failed: ${e.message} — marking all as business`);
-            for (const t of batch) {
-                allResults.push({ tag: '#' + t, business: true, reason: 'AI unavailable' });
-            }
+            // No fallback — retry will handle via aiRequest; propagate error
+            console.warn(`[AI] Hashtag batch ${batchNum} failed: ${e.message}`);
+            throw e;
         }
     }
 

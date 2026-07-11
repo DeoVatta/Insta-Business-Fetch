@@ -104,7 +104,7 @@ async function ensureSheets() {
                     await sheetsClient.spreadsheets.values.update({
                         spreadsheetId: SHEETS_ID,
                         range: `${name}!A1:${name === 'Instagram' ? 'L' : 'D'}1`,
-                        valueInputOption: 'RAW',
+                        valueInputOption: 'USER_ENTERED',
                         resource: { values: [header] }
                     });
                     console.log(`[SHEETS] Header written: "${name}" sheet`);
@@ -184,7 +184,7 @@ async function appendRow(sheetName, endCol, values) {
         const res = await sheetsClient.spreadsheets.values.append({
             spreadsheetId: SHEETS_ID,
             range: `${sheetName}!A:${endCol}`,
-            valueInputOption: 'RAW',
+            valueInputOption: 'USER_ENTERED',
             insertDataOption: 'INSERT_ROWS',
             resource: { values }
         });
@@ -221,11 +221,32 @@ async function flushProfileRows() {
     return ok ? rows.length : 0;
 }
 
+// Convert a WhatsApp number to wa.me URL format
+function formatWhatsAppUrl(wa) {
+    if (!wa) return '';
+    // Normalize: strip all non-digits, preserve leading +
+    const digits = wa.replace(/[^\d+]/g, '');
+    if (digits.startsWith('+')) {
+        // +62XXXXXXXXX → wa.me/+62XXXXXXXXX
+        return `wa.me/${digits}`;
+    }
+    if (digits.startsWith('0')) {
+        // 08XXXXXXXXX → wa.me/+62XXXXXXXXX
+        return `wa.me/+62${digits.slice(1)}`;
+    }
+    if (digits.length >= 10) {
+        // raw digits → assume Indonesian
+        return `wa.me/+62${digits}`;
+    }
+    return wa;
+}
+
 // Convert a profile object to a sheet row (columns A-L)
 function profileToRow(profile) {
     const bio = profile.bio || '';
     const wa = profile.whatsapp || extractWhatsApp(bio);
     const website = profile.website || extractWebsite(bio);
+    const waUrl = formatWhatsAppUrl(wa);
 
     let analyticsStr;
     if (profile.engagementRate !== undefined && profile.engagementRate !== null) {
@@ -244,10 +265,10 @@ function profileToRow(profile) {
     // Handle clientData (from writeClientFromComment) vs full profile
     if (profile.via === 'comment') {
         return [
-            '',
+            '=ROW()-1',
             username,
             profile.profileUrl || `https://instagram.com/${username}/`,
-            '',
+            waUrl,
             '',
             'Client',
             0, 0,
@@ -259,10 +280,10 @@ function profileToRow(profile) {
     }
 
     return [
-        '',
+        '=ROW()-1',
         profile.displayName || username,
         profile.profileUrl || `https://instagram.com/${username}/`,
-        wa,
+        waUrl,
         website,
         profile.category || '',
         profile.followers || 0,
@@ -316,7 +337,7 @@ async function markHashtagStatus(hashtag, status) {
             await sheetsClient.spreadsheets.values.update({
                 spreadsheetId: SHEETS_ID,
                 range: `Hashtags!D${sheetRow}:D${sheetRow}`,
-                valueInputOption: 'RAW',
+                valueInputOption: 'USER_ENTERED',
                 resource: { values: [[status]] }
             });
             console.log(`[SHEETS] Hashtag #${clean} → ${status}`);
@@ -363,7 +384,7 @@ async function resetHashtagStatuses() {
             await sheetsClient.spreadsheets.values.update({
                 spreadsheetId: SHEETS_ID,
                 range: `Hashtags!D${rowIndex}:D${rowIndex}`,
-                valueInputOption: 'RAW',
+                valueInputOption: 'USER_ENTERED',
                 resource: { values: [['Pending']] }
             });
             console.log(`[SHEETS] Reset: ${hashtag} → Pending`);

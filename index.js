@@ -262,7 +262,32 @@ async function run() {
         if (allHT.length > 0) {
             const tagsToClassify = allHT.filter(h => h.status === 'Pending').map(h => h.tag);
             if (tagsToClassify.length > 0) {
-                const aiHashtags = await classifyHashtagsBatch(tagsToClassify);
+                // Outer retry loop: 3x with normal delay, then 3x with longer delay, repeat until AI is up
+                let aiHashtags = [];
+                let retryRound = 0;
+                const MAX_INNER_RETRIES = 3;
+                while (aiHashtags.length === 0 && retryRound < 10) {
+                    try {
+                        aiHashtags = await classifyHashtagsBatch(tagsToClassify);
+                    } catch (e) {
+                        retryRound++;
+                        if (retryRound < MAX_INNER_RETRIES) {
+                            const delay = 5000 * Math.pow(2, retryRound - 1);
+                            console.log(`  [AI] Classification failed: ${e.message} — retry ${retryRound}/${MAX_INNER_RETRIES} in ${delay / 1000}s...`);
+                            await sleep(delay);
+                        } else if (retryRound < MAX_INNER_RETRIES * 2) {
+                            const delay = 30000 + 10000 * (retryRound - MAX_INNER_RETRIES);
+                            console.log(`  [AI] Still failing after ${MAX_INNER_RETRIES} retries — extended wait ${delay / 1000}s...`);
+                            await sleep(delay);
+                        } else {
+                            // Reset round counter for next cycle
+                            retryRound = 0;
+                            const delay = 60000;
+                            console.log(`  [AI] Still failing — waiting 60s before next cycle...`);
+                            await sleep(delay);
+                        }
+                    }
+                }
                 if (aiHashtags.length > 0) {
                     const withCounts = aiHashtags.map(h => ({
                         tag: h.tag,
